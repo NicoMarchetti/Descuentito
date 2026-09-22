@@ -13,8 +13,5 @@
   "routes": [
     { "src": "/api/(.*)", "dest": "api/index.py" },
     { "src": "/(.*)", "dest": "frontend/dist/$1" }
-  ],
-  "functions": {
-    "api/index.py": { "maxDuration": 10 }
-  }
+  ]
 }
