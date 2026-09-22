@@ -1,0 +1,18 @@
+[Unit]
+Description=Descuentito backend (Flask + gunicorn)
+After=network.target
+
+[Service]
+# Ajustá estas dos rutas a donde clones el proyecto y a tu usuario
+WorkingDirectory=/home/TU_USUARIO/descuentito
+ExecStart=/home/TU_USUARIO/descuentito/venv/bin/gunicorn \
+  --workers 3 \
+  --threads 4 \
+  --bind 127.0.0.1:5000 \
+  --timeout 30 \
+  app:app
+Restart=always
+User=TU_USUARIO
+
+[Install]
+WantedBy=multi-user.target
