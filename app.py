@@ -372,6 +372,11 @@ _CARD_IMAGE_RE = re.compile(r"src='(https://cdn\.dekudeals\.com/images/[^']+?\.j
 _CARD_TITLE_RE = re.compile(r"href='/items/([^']+)'>\s*<h6[^>]*>([^<]+)</h6>")
 _CARD_PRICE_RE = re.compile(r"<strong>([^<]+)</strong>")
 
+# Precio de lista (sin descuento), para calcular el % real de descuento
+# -- aparece en la ficha de cada juego como "<strong>MSRP:</strong> $X".
+_MSRP_RE = re.compile(r"<strong>MSRP:</strong>\s*\$?\s*([\d.,]+)")
+
+
 
 def dekudeals_search(query, limit=10):
     """
@@ -442,7 +447,14 @@ def _parse_eshop_ar_from_html(html):
     Extrae el bloque de analytics que DekuDeals expone en cualquier
     página de item (ya sea /app/<steam_appid> o /items/<slug>):
     outAnalytics['eshop_ar:<NSUID>'] = {"currency":"ARS","value":<centavos>,
-      "items":[{...,"discount":<pct>,...}]}
+      "items":[{...,"discount":<monto en pesos, NO porcentaje>,...}]}
+
+    Ojo con "discount": es un parámetro de e-commerce estilo Google
+    Analytics -- ahí "discount" es el MONTO descontado en la moneda del
+    item, no un porcentaje (nos confundió antes: al mostrarlo directo
+    con "%" salían valores como "-3624950%"). Para el % real hay que
+    compararlo contra el precio de lista (MSRP), que también viene en
+    la misma página.
     """
     m = re.search(
         r"outAnalytics\['eshop_ar:(\d+)'\]\s*=\s*(\{.*?\})\s*(?:;|</script>)",
@@ -458,14 +470,24 @@ def _parse_eshop_ar_from_html(html):
         return {"on_switch": False}
 
     value = data.get("value")
-    item = (data.get("items") or [{}])[0]
+    final_price = value / 100 if value is not None else None
+
+    discount_percent = 0
+    msrp_m = _MSRP_RE.search(html)
+    if msrp_m and final_price is not None:
+        try:
+            msrp = _parse_ar_price(msrp_m.group(1))
+            if msrp > 0 and final_price < msrp:
+                discount_percent = round((msrp - final_price) / msrp * 100)
+        except ValueError:
+            pass
 
     return {
         "on_switch": True,
         "nsuid": nsuid,
         "currency": data.get("currency", "ARS"),
-        "price": value / 100 if value is not None else None,
-        "discount_percent": item.get("discount", 0),
+        "price": final_price,
+        "discount_percent": discount_percent,
     }
 
 
