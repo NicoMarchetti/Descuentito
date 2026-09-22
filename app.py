@@ -673,7 +673,11 @@ def route_home():
     más es rápido aunque el pool total sea grande.
     """
     page = request.args.get("page", default=1, type=int)
-    page_size = request.args.get("page_size", default=12, type=int)
+    # Default más chico que antes: en Vercel (plan Hobby) cada función
+    # tiene un tope de 10s, y cada juego acá dispara 2 requests externos
+    # en paralelo (Nintendo + Epic/GOG) -- con menos juegos por página
+    # hay más margen para no pasarse del límite.
+    page_size = request.args.get("page_size", default=8, type=int)
     page = max(1, page)
     page_size = max(1, min(page_size, 50))
 
