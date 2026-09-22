@@ -90,14 +90,17 @@ def cached(key, fetch_fn):
 
 def steam_search(query):
     def fetch():
-        r = requests.get(
-            STEAM_SEARCH_URL,
-            params={"term": query, "l": "spanish", "cc": "ar"},
-            headers=HEADERS,
-            timeout=10,
-        )
-        r.raise_for_status()
-        items = r.json().get("items", [])
+        try:
+            r = requests.get(
+                STEAM_SEARCH_URL,
+                params={"term": query, "l": "spanish", "cc": "ar"},
+                headers=HEADERS,
+                timeout=10,
+            )
+            r.raise_for_status()
+            items = r.json().get("items", [])
+        except (requests.RequestException, ValueError):
+            return []
         return [
             {
                 "appid": it["id"],
@@ -112,14 +115,18 @@ def steam_search(query):
 
 def steam_price(appid):
     def fetch():
-        r = requests.get(
-            STEAM_DETAILS_URL,
-            params={"appids": appid, "cc": "ar", "l": "spanish"},
-            headers=HEADERS,
-            timeout=10,
-        )
-        r.raise_for_status()
-        payload = r.json().get(str(appid), {})
+        try:
+            r = requests.get(
+                STEAM_DETAILS_URL,
+                params={"appids": appid, "cc": "ar", "l": "spanish"},
+                headers=HEADERS,
+                timeout=10,
+            )
+            r.raise_for_status()
+            payload = r.json().get(str(appid), {})
+        except (requests.RequestException, ValueError):
+            return {"available": False}
+
         if not payload.get("success"):
             return {"available": False}
 
@@ -152,14 +159,17 @@ def steam_deals_all():
     """
 
     def fetch():
-        r = requests.get(
-            "https://store.steampowered.com/api/featuredcategories",
-            params={"cc": "ar", "l": "spanish"},
-            headers=HEADERS,
-            timeout=10,
-        )
-        r.raise_for_status()
-        items = r.json().get("specials", {}).get("items", [])
+        try:
+            r = requests.get(
+                "https://store.steampowered.com/api/featuredcategories",
+                params={"cc": "ar", "l": "spanish"},
+                headers=HEADERS,
+                timeout=10,
+            )
+            r.raise_for_status()
+            items = r.json().get("specials", {}).get("items", [])
+        except (requests.RequestException, ValueError):
+            return []
         return [
             {
                 "appid": it["id"],
@@ -174,6 +184,7 @@ def steam_deals_all():
         ]
 
     return cached("steam_deals_all", fetch)
+
 
 
 def steam_deals(limit=30):
@@ -204,9 +215,12 @@ def dolar_rates():
     """
 
     def fetch():
-        r = requests.get("https://dolarapi.com/v1/dolares", headers=HEADERS, timeout=10)
-        r.raise_for_status()
-        return r.json()
+        try:
+            r = requests.get("https://dolarapi.com/v1/dolares", headers=HEADERS, timeout=10)
+            r.raise_for_status()
+            return r.json()
+        except (requests.RequestException, ValueError):
+            return []
 
     return cached("dolar_rates", fetch)
 
@@ -215,10 +229,13 @@ def cheapshark_store_ids():
     """{'Epic Games Store': '25', 'GOG': '7', ...} -- ids reales, no hardcodeados."""
 
     def fetch():
-        r = requests.get(CHEAPSHARK_STORES_URL, headers=HEADERS, timeout=10)
-        r.raise_for_status()
-        stores = r.json()
-        return {s["storeName"]: s["storeID"] for s in stores if s.get("isActive")}
+        try:
+            r = requests.get(CHEAPSHARK_STORES_URL, headers=HEADERS, timeout=10)
+            r.raise_for_status()
+            stores = r.json()
+            return {s["storeName"]: s["storeID"] for s in stores if s.get("isActive")}
+        except (requests.RequestException, ValueError):
+            return {}
 
     return cached("cheapshark_stores", fetch)
 
@@ -234,18 +251,23 @@ def pc_store_search(query, limit=10):
         return []
 
     def fetch():
-        r = requests.get(
-            CHEAPSHARK_DEALS_URL,
-            params={
-                "title": query,
-                "storeID": ",".join(wanted_ids),
-                "limit": limit,
-                "sortBy": "Title",
-            },
-            headers=HEADERS,
-            timeout=10,
-        )
-        r.raise_for_status()
+        try:
+            r = requests.get(
+                CHEAPSHARK_DEALS_URL,
+                params={
+                    "title": query,
+                    "storeID": ",".join(wanted_ids),
+                    "limit": limit,
+                    "sortBy": "Title",
+                },
+                headers=HEADERS,
+                timeout=10,
+            )
+            r.raise_for_status()
+            deals = r.json()
+        except (requests.RequestException, ValueError):
+            return []
+
         id_to_name = {v: k for k, v in store_ids.items()}
         return [
             {
@@ -258,7 +280,7 @@ def pc_store_search(query, limit=10):
                 "deal_url": f"https://www.cheapshark.com/redirect?dealID={d['dealID']}",
                 "thumb": d.get("thumb"),
             }
-            for d in r.json()
+            for d in deals
         ]
 
     return cached(f"pc_store_search:{query}:{limit}", fetch)
@@ -278,18 +300,23 @@ def cheapshark_browse_deals(store_name, limit=40):
     store_id = store_ids[store_name]
 
     def fetch():
-        r = requests.get(
-            CHEAPSHARK_DEALS_URL,
-            params={
-                "storeID": store_id,
-                "sortBy": "Savings",
-                "pageSize": limit,
-                "onSale": 1,
-            },
-            headers=HEADERS,
-            timeout=10,
-        )
-        r.raise_for_status()
+        try:
+            r = requests.get(
+                CHEAPSHARK_DEALS_URL,
+                params={
+                    "storeID": store_id,
+                    "sortBy": "Savings",
+                    "pageSize": limit,
+                    "onSale": 1,
+                },
+                headers=HEADERS,
+                timeout=10,
+            )
+            r.raise_for_status()
+            deals = r.json()
+        except (requests.RequestException, ValueError):
+            return []
+
         return [
             {
                 "name": d["title"],
@@ -302,7 +329,7 @@ def cheapshark_browse_deals(store_name, limit=40):
                 "thumb": d.get("thumb"),
                 "steam_appid": int(d["steamAppID"]) if d.get("steamAppID") else None,
             }
-            for d in r.json()
+            for d in deals
         ]
 
     return cached(f"cheapshark_browse:{store_name}:{limit}", fetch)
