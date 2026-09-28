@@ -4,7 +4,7 @@ import { addLocalWatchlistItem, getLocalWatchlist } from "./lib/watchlist";
 import type { CompareResponse, DolarRate } from "./lib/types";
 import { CompareTable, type WatchTarget } from "./components/CompareTable";
 import { WatchlistPanel } from "./components/WatchlistPanel";
-
+import { CafecitoButton } from "./components/CafecitoButton";
 type Tab = "comparar" | "seguimiento";
 type Mode = "home" | "search";
 
@@ -139,6 +139,7 @@ export default function App() {
               seguimiento
             </a>
           </div>
+          <CafecitoButton />
           <button
             className="btn btn-ghost btn-circle btn-sm"
             onClick={toggleTheme}
