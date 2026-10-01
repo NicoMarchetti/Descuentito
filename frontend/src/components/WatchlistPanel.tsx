@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { checkWatchlistDeals } from "../lib/api";
-import { addLocalWatchlistItem, getLocalWatchlist, removeLocalWatchlistItem } from "../lib/watchlist";
+import { getLocalWatchlist, removeLocalWatchlistItem } from "../lib/watchlist";
 import type { WatchlistDeal, WatchlistItem } from "../lib/types";
-import { OfferGrid, type Offer, type StoreKey, type WatchTarget } from "./OfferGrid";
+import { GameGroupGrid, type GameGroup, type GameGroupRow, type StoreKey } from "./OfferGrid";
 
 interface Props {
   usdToArs?: number;
@@ -43,18 +43,7 @@ export function WatchlistPanel({ usdToArs }: Props) {
     setDeals((prev) => prev?.filter((d) => d.id !== id) ?? prev);
   }
 
-  // Desde acá también se puede seguir una tarjeta de Epic/GOG que
-  // apareció como comparación de un juego ya seguido por otra tienda
-  // (ver buildWatchOffers): se guarda como un item más y se chequea su
-  // precio en la próxima actualización.
-  function watch(target: WatchTarget) {
-    const next = addLocalWatchlistItem(target);
-    setItems(next);
-    refresh(next);
-  }
-
-  const offers = buildWatchOffers(items, deals, remove);
-  const watchedIds = new Set(items.map((i) => i.id));
+  const groups = buildWatchGroups(items, deals, remove);
 
   return (
     <section className="mb-10">
@@ -75,10 +64,14 @@ export function WatchlistPanel({ usdToArs }: Props) {
 
       {error && <p className="mb-3 text-sm text-error">{error}</p>}
 
-      <OfferGrid
-        offers={offers}
-        watchedIds={watchedIds}
-        onWatch={watch}
+      <GameGroupGrid
+        groups={groups}
+        // Acá nunca hay nada para seguir (todo lo que se ve ya está
+        // seguido -- cada tarjeta trae "onRemove" en vez de watchTarget),
+        // así que watchedIds/onWatch no se usan de verdad, pero el
+        // componente los pide igual porque lo comparte con CompareTable.
+        watchedIds={new Set()}
+        onWatch={() => { }}
         usdToArs={usdToArs}
         emptyMessage='Todavía no seguís ningún juego. Tocá "+ seguir" en cualquier tarjeta de la pantalla principal -- se guarda en este navegador.'
       />
@@ -86,39 +79,45 @@ export function WatchlistPanel({ usdToArs }: Props) {
   );
 }
 
-// Arma las tarjetas de los seguidos con el MISMO formato que la
-// pantalla principal: un item seguido por Steam puede salir como
-// tarjeta de Steam + tarjeta de Switch (si ese juego también está en
-// Switch) + tarjeta(s) de Epic/GOG (si ese nombre aparece ahí), igual
-// que un resultado "matched" de /api/compare -- la gracia de "seguidos"
-// es justamente poder comparar el mismo juego entre TODAS las tiendas,
-// no solo ver el precio de la tienda por la que lo seguiste. La imagen
-// de la tarjeta "de origen" (Steam o Switch) sale del item guardado en
-// localStorage (se capturó al tocar "+ seguir" en su momento); las de
-// Epic/GOG traen su propia imagen. El precio sale de la última consulta
-// a /api/watchlist/deals -- mientras no llegó esa respuesta, la tarjeta
-// de origen se muestra igual (con imagen y nombre) pero avisando que
-// está cargando en vez de "no disponible"; las de Epic/GOG directamente
-// no aparecen todavía porque no se puede saber si existen sin la
-// respuesta.
-function buildWatchOffers(
+// Arma UN grupo por cada item seguido, con un renglón por tienda donde
+// aparece -- un item seguido por Steam puede sumar renglón de Switch (si
+// ese juego también está ahí) y renglón(es) de Epic/GOG (si ese nombre
+// aparece ahí), igual que un resultado "matched" de /api/compare -- la
+// gracia de "seguidos" es justamente poder comparar el mismo juego entre
+// TODAS las tiendas, no solo ver el precio de la tienda por la que lo
+// seguiste. Como acá el juego ya está seguido, NINGÚN renglón lleva
+// watchTarget (no hay "+ seguir" por tienda -- ver el pedido del
+// usuario: una vez que seguís el juego, lo que querés es comparar
+// precios, no volver a decidir si seguirlo tienda por tienda); el único
+// botón de la tarjeta es "sacar", a nivel juego completo (onRemove). La
+// imagen y el nombre del grupo salen del item guardado en localStorage
+// (se capturó al tocar "+ seguir" en su momento), con fallback a la
+// imagen que traiga cualquiera de las tiendas cruzadas si el item
+// original no tenía una. El precio sale de la última consulta a
+// /api/watchlist/deals -- mientras no llegó esa respuesta, el renglón de
+// origen se muestra igual (con la tienda) pero avisando que está
+// cargando en vez de "no disponible"; los renglones cruzados
+// directamente no aparecen todavía porque no se puede saber si existen
+// sin la respuesta.
+function buildWatchGroups(
   items: WatchlistItem[],
   deals: WatchlistDeal[] | null,
   onRemove: (id: string) => void,
-): Offer[] {
+): GameGroup[] {
   const byId = new Map((deals ?? []).map((d) => [d.id, d]));
   const pending = deals === null;
 
-  const offers: Offer[] = [];
+  const groups: GameGroup[] = [];
+
   for (const item of items) {
     const d = byId.get(item.id);
+    const rows: GameGroupRow[] = [];
+    let image = item.image;
 
     if (item.kind === "steam") {
-      offers.push({
-        id: `steam:${item.appid}`,
+      rows.push({
+        key: `steam:${item.appid}`,
         store: "steam",
-        name: item.name,
-        image: item.image,
         available: !!d?.steam?.available,
         currency: d?.steam?.currency,
         finalPrice: d?.steam?.final_price,
@@ -127,49 +126,56 @@ function buildWatchOffers(
         isFree: d?.steam?.is_free,
         unavailableReason: pending ? "cargando..." : (d?.steam?.reason ?? "no disponible"),
         dealUrl: `https://store.steampowered.com/app/${item.appid}`,
-        onRemove: () => onRemove(item.id),
       });
 
       if (d?.nintendo?.on_switch) {
-        offers.push({
-          id: `switch:${item.appid}`,
+        rows.push({
+          key: `switch:${item.appid}`,
           store: "switch",
-          name: item.name,
-          image: item.image,
           available: true,
           currency: d.nintendo.currency,
           finalPrice: d.nintendo.price,
           discountPercent: d.nintendo.discount_percent,
-          switch2: d.nintendo.switch2,
           dealUrl: `https://www.dekudeals.com/app/${item.appid}`,
-          onRemove: () => onRemove(item.id),
         });
       }
     } else if (item.kind === "nintendo") {
-      // seguido directo por su slug de DekuDeals (exclusivo, sin Steam)
-      offers.push({
-        id: `switch:${item.slug}`,
+      // seguido directo por su slug de DekuDeals -- "exclusivo de
+      // Nintendo" según cómo lo encontraste, pero DekuDeals solo nos
+      // confirma que existe en Switch, no que NO esté en Steam, así que
+      // el backend también lo busca por nombre ahí (ver steam_appid).
+      rows.push({
+        key: `switch:${item.slug}`,
         store: "switch",
-        name: item.name,
-        image: item.image,
         available: !!d?.nintendo?.on_switch,
         currency: d?.nintendo?.currency,
         finalPrice: d?.nintendo?.price,
         discountPercent: d?.nintendo?.discount_percent,
-        switch2: d?.nintendo?.switch2,
         unavailableReason: pending ? "cargando..." : "no disponible",
         dealUrl: `https://www.dekudeals.com/items/${item.slug}`,
-        onRemove: () => onRemove(item.id),
       });
+
+      if (d?.steam_appid && d.steam?.available) {
+        const appid = d.steam_appid;
+        rows.push({
+          key: `steam:${appid}`,
+          store: "steam",
+          available: true,
+          currency: d.steam.currency,
+          finalPrice: d.steam.final_price,
+          initialPrice: d.steam.initial_price,
+          discountPercent: d.steam.discount_percent,
+          isFree: d.steam.is_free,
+          dealUrl: `https://store.steampowered.com/app/${appid}`,
+        });
+      }
     } else {
       // kind === "pc": seguido directo en Epic/GOG por su gameID de CheapShark
       const store = item.store ?? "epic";
-      const image = item.image ?? d?.pc?.thumb;
-      offers.push({
-        id: `pc:${store}:${item.gameId}`,
+      image = item.image ?? d?.pc?.thumb;
+      rows.push({
+        key: `pc:${store}:${item.gameId}`,
         store,
-        name: item.name,
-        image,
         available: !!d?.pc?.available,
         currency: d?.pc?.currency,
         finalPrice: d?.pc?.final_price,
@@ -177,44 +183,34 @@ function buildWatchOffers(
         discountPercent: d?.pc?.discount_percent,
         unavailableReason: pending ? "cargando..." : "no disponible",
         dealUrl: d?.pc?.deal_url,
-        onRemove: () => onRemove(item.id),
       });
 
       // CheapShark conoce el steamAppID de este juego (cuando existe) --
       // con eso se arma la comparación contra Steam y, si también está
-      // en Switch, contra Switch, igual que pasa con un seguido por
-      // Steam. Llevan su propio watchTarget para poder seguirse/sacarse
-      // por su cuenta.
+      // en Switch, contra Switch, igual que pasa con un seguido por Steam.
       if (d?.steam_appid) {
         const appid = d.steam_appid;
         if (d.steam?.available) {
-          offers.push({
-            id: `steam:${appid}`,
+          rows.push({
+            key: `steam:${appid}`,
             store: "steam",
-            name: item.name,
-            image,
             available: true,
             currency: d.steam.currency,
             finalPrice: d.steam.final_price,
             initialPrice: d.steam.initial_price,
             discountPercent: d.steam.discount_percent,
             isFree: d.steam.is_free,
-            watchTarget: { kind: "steam", appid, name: item.name, image },
             dealUrl: `https://store.steampowered.com/app/${appid}`,
           });
         }
         if (d.nintendo?.on_switch) {
-          offers.push({
-            id: `switch:${appid}`,
+          rows.push({
+            key: `switch:${appid}`,
             store: "switch",
-            name: item.name,
-            image,
             available: true,
             currency: d.nintendo.currency,
             finalPrice: d.nintendo.price,
             discountPercent: d.nintendo.discount_percent,
-            switch2: d.nintendo.switch2,
-            watchTarget: { kind: "steam", appid, name: item.name, image },
             dealUrl: `https://www.dekudeals.com/app/${appid}`,
           });
         }
@@ -222,28 +218,30 @@ function buildWatchOffers(
     }
 
     // Epic/GOG cruzados por nombre -- comparar el mismo juego contra
-    // TODAS las tiendas, no solo la que usaste para seguirlo. Llevan su
-    // propio watchTarget (gameID) para poder seguirse/sacarse por su
-    // cuenta, independiente del item "de origen" de esta vuelta del loop.
+    // TODAS las tiendas, no solo la que usaste para seguirlo.
     for (const p of d?.pc_stores ?? []) {
       const store: StoreKey = p.store === "GOG" ? "gog" : "epic";
-      offers.push({
-        id: `${store}:${item.id}:${p.deal_url}`,
+      rows.push({
+        key: `${store}:${item.id}:${p.deal_url}`,
         store,
-        name: p.name,
-        image: p.thumb,
         available: true,
         currency: p.currency,
         finalPrice: p.final_price,
         initialPrice: p.initial_price,
         discountPercent: p.discount_percent,
         dealUrl: p.deal_url,
-        watchTarget: p.game_id
-          ? { kind: "pc", store, gameId: p.game_id, name: p.name, image: p.thumb }
-          : undefined,
       });
+      if (!image) image = p.thumb;
     }
+
+    groups.push({
+      id: item.id,
+      name: item.name,
+      image,
+      rows,
+      onRemove: () => onRemove(item.id),
+    });
   }
 
-  return offers;
+  return groups;
 }

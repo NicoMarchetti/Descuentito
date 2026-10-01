@@ -151,11 +151,12 @@ def steam_price(appid):
     return cached(f"steam_price:{appid}", fetch)
 
 
-def steam_deals_all():
+def _steam_featured_categories():
     """
-    Trae TODAS las ofertas actuales de Steam (categoría "Specials" de la
-    tienda), en ARS, sin recortar -- el recorte para paginar lo hace
-    quien la llame. Endpoint público de Steam.
+    Un solo pedido al endpoint de categorías destacadas de Steam, de
+    donde salen TANTO "specials" (ofertas) COMO "top_sellers" (más
+    vendidos) -- se cachea una sola vez y de acá se arman las dos listas
+    (steam_deals_all y steam_top_sellers), en vez de pedirlo dos veces.
     """
 
     def fetch():
@@ -167,24 +168,46 @@ def steam_deals_all():
                 timeout=10,
             )
             r.raise_for_status()
-            items = r.json().get("specials", {}).get("items", [])
+            return r.json()
         except (requests.RequestException, ValueError):
-            return []
-        return [
-            {
-                "appid": it["id"],
-                "name": it["name"],
-                "currency": it.get("currency"),
-                "initial_price": it.get("original_price", 0) / 100,
-                "final_price": it.get("final_price", 0) / 100,
-                "discount_percent": it.get("discount_percent", 0),
-                "tiny_image": it.get("large_capsule_image") or it.get("header_image"),
-            }
-            for it in items
-        ]
+            return {}
 
-    return cached("steam_deals_all", fetch)
+    return cached("steam_featured_categories", fetch)
 
+
+def _steam_items_from_category(category):
+    items = _steam_featured_categories().get(category, {}).get("items", [])
+    return [
+        {
+            "appid": it["id"],
+            "name": it["name"],
+            "currency": it.get("currency"),
+            "initial_price": it.get("original_price", 0) / 100,
+            "final_price": it.get("final_price", 0) / 100,
+            "discount_percent": it.get("discount_percent", 0),
+            "tiny_image": it.get("large_capsule_image") or it.get("header_image"),
+        }
+        for it in items
+    ]
+
+
+def steam_deals_all():
+    """
+    TODAS las ofertas actuales de Steam (categoría "Specials" de la
+    tienda), en ARS, sin recortar -- el recorte para paginar lo hace
+    quien la llame.
+    """
+    return _steam_items_from_category("specials")
+
+
+def steam_top_sellers():
+    """
+    Los más vendidos de Steam AHORA (categoría "top_sellers" de la
+    misma tienda) -- es el orden real de Valve, no un invento nuestro;
+    sirve como alternativa a "más descuento" para ordenar la pantalla
+    de inicio. No todos están en oferta (discount_percent puede ser 0).
+    """
+    return _steam_items_from_category("top_sellers")
 
 
 def steam_deals(limit=30):
@@ -760,15 +783,30 @@ def route_compare():
     )
 
 
-def home_candidates():
+HOME_SORTS = ("destacadas", "mas_vendidas")
+
+
+def home_candidates(sort="destacadas"):
     """
     Pool combinado de candidatos para el feed de inicio, juntando TRES
-    fuentes independientes (no solo Steam): ofertas de Steam, ofertas de
-    Epic y ofertas de GOG (estas dos últimas navegadas directo por
-    descuento en CheapShark, sin buscar nada puntual). Se deduplica por
-    nombre -- si el mismo juego aparece en más de una tienda, se
-    completa en un solo candidato con los precios que se van
-    encontrando.
+    fuentes independientes (no solo Steam): Steam, Epic y GOG (estas dos
+    últimas navegadas directo por descuento en CheapShark, sin buscar
+    nada puntual). Se deduplica por nombre -- si el mismo juego aparece
+    en más de una tienda, se completa en un solo candidato con los
+    precios que se van encontrando.
+
+    sort="destacadas" (default): la fuente de Steam son sus OFERTAS
+    actuales (categoría "specials"), y el orden final es por mayor
+    descuento (entre las tres tiendas).
+
+    sort="mas_vendidas": la fuente de Steam son sus MÁS VENDIDOS ahora
+    mismo (categoría "top_sellers" -- el ranking real de Valve, no
+    inventado acá), y se respeta ESE orden en vez de reordenar por
+    descuento; la mayoría de estos no están en oferta (discount_percent
+    en 0), lo cual es esperable. Epic/GOG no tienen un "más vendidos"
+    público en CheapShark, así que sus candidatos (los que no aparecen
+    también en el top de Steam) se agregan al final, ordenados por
+    descuento como siempre.
 
     Solo se conservan candidatos con steam_appid conocido: es el ID que
     usamos para todo (consultar Nintendo, armar la watchlist), así que
@@ -777,9 +815,12 @@ def home_candidates():
     el steamAppID de un montón de ofertas de Epic/GOG aunque la oferta
     en sí sea de esa tienda.
     """
+    if sort not in HOME_SORTS:
+        sort = "destacadas"
 
     def fetch():
         candidates = {}
+        steam_order = []  # orden real de Steam (solo se usa en "mas_vendidas")
 
         def upsert(name, tiny_image, steam_appid, **store_price):
             key = name.strip().lower()
@@ -791,9 +832,12 @@ def home_candidates():
             if steam_appid and not c["steam_appid"]:
                 c["steam_appid"] = steam_appid
             c.update(store_price)
+            return key
 
-        for d in steam_deals_all():
-            upsert(
+        steam_source = steam_top_sellers() if sort == "mas_vendidas" else steam_deals_all()
+
+        for d in steam_source:
+            key = upsert(
                 d["name"],
                 d["tiny_image"],
                 d["appid"],
@@ -806,6 +850,7 @@ def home_candidates():
                     "discount_percent": d["discount_percent"],
                 },
             )
+            steam_order.append(key)
 
         for d in cheapshark_browse_deals("Epic Games Store", limit=60):
             upsert(d["name"], d["thumb"], d.get("steam_appid"), epic=d)
@@ -821,10 +866,21 @@ def home_candidates():
                 default=0,
             )
 
-        with_appid.sort(key=best_discount, reverse=True)
+        if sort == "mas_vendidas":
+            rank = {key: i for i, key in enumerate(steam_order)}
+            last = len(steam_order)
+            with_appid.sort(
+                key=lambda c: (
+                    rank.get(c["name"].strip().lower(), last),
+                    -best_discount(c),
+                )
+            )
+        else:
+            with_appid.sort(key=best_discount, reverse=True)
+
         return with_appid
 
-    return cached("home_candidates", fetch)
+    return cached(f"home_candidates:{sort}", fetch)
 
 
 @app.get("/api/home")
@@ -837,6 +893,8 @@ def route_home():
     Paginado: ?page=1&page_size=12 (defaults). Cada página solo dispara
     requests a DekuDeals para los juegos de ESA página -- por eso pedir
     más es rápido aunque el pool total sea grande.
+
+    ?sort=destacadas (default) o ?sort=mas_vendidas -- ver home_candidates.
     """
     page = request.args.get("page", default=1, type=int)
     # Default más chico que antes: en Vercel (plan Hobby) cada función
@@ -846,8 +904,11 @@ def route_home():
     page_size = request.args.get("page_size", default=8, type=int)
     page = max(1, page)
     page_size = max(1, min(page_size, 50))
+    sort = request.args.get("sort", default="destacadas")
+    if sort not in HOME_SORTS:
+        sort = "destacadas"
 
-    all_candidates = home_candidates()
+    all_candidates = home_candidates(sort)
     start = (page - 1) * page_size
     page_candidates = all_candidates[start : start + page_size]
 
@@ -884,6 +945,7 @@ def route_home():
     return jsonify(
         {
             "query": " ",
+            "sort": sort,
             "matched": matched,
             "steam_only": not_on_switch,
             "pc_stores": pc_results,
@@ -954,12 +1016,25 @@ def route_watchlist_deals():
                 return None
             deku = dekudeals_item(slug)
             pc_stores = pc_store_search(item.get("name", ""), limit=3)
+
+            # Un exclusivo de Nintendo seguido directo por su slug de
+            # DekuDeals puede, en realidad, SÍ estar en Steam (DekuDeals
+            # solo nos dice "existe en Switch", no si es exclusivo de
+            # verdad) -- buscamos por nombre en Steam para poder
+            # mostrarlo también ahí, igual que con Epic/GOG. Nos
+            # quedamos con el primer resultado (ya viene ordenado por
+            # relevancia por la propia búsqueda de Steam).
+            steam_matches = steam_search(item.get("name", ""))
+            steam_appid = steam_matches[0]["appid"] if steam_matches else None
+            sp = steam_price(steam_appid) if steam_appid else None
+
             return {
                 "id": item.get("id"),
                 "name": item.get("name"),
-                "steam": None,
+                "steam": sp,
                 "nintendo": deku,
                 "pc_stores": pc_stores,
+                "steam_appid": steam_appid,
             }
 
         if kind == "pc":

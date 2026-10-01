@@ -17,8 +17,10 @@ export function compare(query: string): Promise<CompareResponse> {
   return getJSON(`/api/compare?q=${encodeURIComponent(query)}`);
 }
 
-export function home(page = 1): Promise<CompareResponse> {
-  return getJSON(`/api/home?page=${page}`);
+export type HomeSort = "destacadas" | "mas_vendidas";
+
+export function home(page = 1, sort: HomeSort = "destacadas"): Promise<CompareResponse> {
+  return getJSON(`/api/home?page=${page}&sort=${sort}`);
 }
 
 export function getDolarRates(): Promise<DolarRate[]> {

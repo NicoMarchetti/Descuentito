@@ -44,11 +44,15 @@ export default {
           "primary-content": "#1f1235",
           secondary: "#7c8798",
           accent: "#fb923c",
-          neutral: "#172420",
-          "base-100": "#0d1715",
-          "base-200": "#152321",
-          "base-300": "#223531",
-          "base-content": "#e8f0ee",
+          // Gris neutro puro (R=G=B, sin tinte hacia ningún color) --
+          // se distingue del azul grisáceo de Steam (#171D25) por no
+          // tener nada de azul, sin inclinarse hacia verde, violeta ni
+          // ningún otro color de tienda.
+          neutral: "#1c1c1c",
+          "base-100": "#121212",
+          "base-200": "#1a1a1a",
+          "base-300": "#2a2a2a",
+          "base-content": "#ededed",
           info: "#4aa8ff",
           success: "#3ecf8e",
           warning: "#ffb84a",

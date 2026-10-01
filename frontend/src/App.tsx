@@ -78,7 +78,10 @@ export default function App() {
   const usdToArs = convertOn ? selectedRate?.venta : undefined;
 
   useEffect(() => {
-    if (mode === "home") load(() => home(1));
+    if (mode === "home") {
+      loadedPageRef.current = 1;
+      load(() => home(1));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
@@ -109,13 +112,29 @@ export default function App() {
     setQuery("");
   }
 
+  // Guardas SINCRÓNICAS (ref, no state) contra pedir la misma página dos
+  // veces: el sentinel puede disparar el IntersectionObserver más de una
+  // vez seguida (se reconecta cada vez que cambia result.page, y si el
+  // sentinel sigue en pantalla dispara de nuevo) antes de que React
+  // llegue a procesar el setLoadingMore(true) anterior -- con solo el
+  // state como guarda, esa segunda llamada pasaba el chequeo igual y
+  // pedía la MISMA página de nuevo, duplicando las tarjetas. loadingMoreRef
+  // se marca en el mismo tick (no espera al render) y loadedPageRef evita
+  // reprocesar una página que ya se agregó aunque la llamada se dispare
+  // después de que la anterior ya terminó.
+  const loadingMoreRef = useRef(false);
+  const loadedPageRef = useRef<number | null>(1);
+
   async function handleLoadMore() {
-    if (!result || !result.has_more || loadingMore || loading) return;
+    if (!result || !result.has_more || loading) return;
     const nextPage = (result.page ?? 1) + 1;
+    if (loadingMoreRef.current || loadedPageRef.current === nextPage) return;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
     setError(null);
     try {
       const next = await home(nextPage);
+      loadedPageRef.current = nextPage;
       setResult((prev) =>
         prev
           ? {
@@ -129,6 +148,7 @@ export default function App() {
     } catch (err) {
       setError((err as Error).message);
     } finally {
+      loadingMoreRef.current = false;
       setLoadingMore(false);
     }
   }
@@ -195,7 +215,7 @@ export default function App() {
       </header>
 
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex">
+        <div className="flex flex-wrap items-center gap-3">
           {tab === "comparar" && (
             <div className="flex border-2 border-base-content/40">
               <button
@@ -371,6 +391,7 @@ export default function App() {
                 watchedIds={watchedIds}
                 usdToArs={usdToArs}
                 storeFilter={storeFilter}
+                searchQuery={mode === "search" ? result.query : undefined}
               />
             )
           )}
@@ -394,7 +415,7 @@ export default function App() {
               ) : (
                 <div className="flex justify-center">
                   <span className="text-sm text-base-content/50">
-
+                    eso es todo lo que hay en oferta ahora ({result.total})
                   </span>
                 </div>
               )}
