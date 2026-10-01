@@ -1,5 +1,5 @@
 interface PriceCellProps {
-  storeLabel: string;
+  storeLabel?: string;
   available: boolean;
   currency?: string;
   finalPrice?: number;
@@ -9,7 +9,7 @@ interface PriceCellProps {
   unavailableReason?: string;
   /** Si viene y currency es "USD", se muestra convertido a ARS (con el original en USD chiquito al lado). */
   usdToArs?: number;
-  /** Resalta esta celda como el precio más barato de la fila. */
+  /** Resalta esta celda como el precio más barato (solo tiene sentido si la usás en un contexto que compara varias tiendas a la vez). */
   isCheapest?: boolean;
 }
 
@@ -44,9 +44,11 @@ export function PriceCell({
 
   return (
     <div className="flex flex-col gap-0.5 font-mono text-sm">
-      <span className="text-[0.65rem] uppercase tracking-wide text-base-content/50">
-        {storeLabel}
-      </span>
+      {storeLabel && (
+        <span className="text-[0.65rem] uppercase tracking-wide text-base-content/50">
+          {storeLabel}
+        </span>
+      )}
 
       {!available && (
         <span className="text-base-content/40">
@@ -66,7 +68,7 @@ export function PriceCell({
                 ? "font-bold text-accent"
                 : discountPercent
                   ? "font-medium text-success"
-                  : ""
+                  : "font-semibold"
             }
           >
             {convert

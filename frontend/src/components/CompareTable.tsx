@@ -1,234 +1,162 @@
-import type { CompareResponse, PcStoreDeal } from "../lib/types";
-import { PriceCell } from "./PriceCell";
+import type {
+  CompareResponse,
+  MatchedEntry,
+  NintendoDirectResult,
+  PcStoreDeal,
+  SteamResult,
+} from "../lib/types";
+import { OfferGrid, STORE_META, type Offer, type StoreKey, type WatchTarget } from "./OfferGrid";
 
-export type WatchTarget =
-  | { kind: "steam"; appid: number; name: string }
-  | { kind: "nintendo"; slug: string; name: string };
+export { STORE_META };
+export type { StoreKey, WatchTarget };
 
 interface Props {
   data: CompareResponse;
   onWatch: (target: WatchTarget) => void;
   watchedIds: Set<string>;
   usdToArs?: number;
+  /** "all" (o no venir) muestra todas las tiendas; una StoreKey puntual muestra solo esa. */
+  storeFilter?: StoreKey | "all";
 }
 
-interface Row {
-  id: string;
-  watchTarget: WatchTarget;
-  name: string;
-  image?: string;
-  steam?: CompareResponse["matched"][number]["steam"]["price"];
-  nintendo: CompareResponse["matched"][number]["nintendo"];
-  epic?: PcStoreDeal;
-  gog?: PcStoreDeal;
-}
-
-// Convierte un precio a ARS para poder comparar "más barato" entre
-// tiendas con distinta moneda -- solo se puede si ya está en ARS, o si
-// está en USD y tenemos una cotización activa para convertirlo. Si no,
-// devuelve undefined y esa celda simplemente no entra en la comparación
-// (no tiene sentido comparar ARS contra USD sin convertir).
-function toArs(
-  currency: string | undefined,
-  price: number | undefined,
-  usdToArs: number | undefined,
-): number | undefined {
-  if (price === undefined || !currency) return undefined;
-  if (currency === "ARS") return price;
-  if (currency === "USD" && usdToArs) return price * usdToArs;
-  return undefined;
-}
-
-function isMin(value: number | undefined, min: number | undefined): boolean {
-  return value !== undefined && min !== undefined && Math.abs(value - min) < 0.01;
-}
-
-export function CompareTable({ data, onWatch, watchedIds, usdToArs }: Props) {
-  const rows = buildRows(data);
+export function CompareTable({ data, onWatch, watchedIds, usdToArs, storeFilter }: Props) {
+  const allOffers = buildOffers(data);
+  const offers =
+    storeFilter && storeFilter !== "all"
+      ? allOffers.filter((o) => o.store === storeFilter)
+      : allOffers;
 
   return (
     <section className="mb-10">
       <div className="mb-3 font-mono text-xs tracking-wide text-base-content/50">
-        RESULTADOS PARA "{data.query}" ({rows.length})
+        RESULTADOS PARA "{data.query}" ({offers.length})
       </div>
 
-      {rows.length === 0 ? (
-        <div className="py-6 text-sm text-base-content/40">Sin resultados.</div>
-      ) : (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-          {rows.map((row) => {
-            const steamArs =
-              row.steam?.available && !row.steam.is_free
-                ? toArs(row.steam.currency, row.steam.final_price, usdToArs)
-                : undefined;
-            const nintendoArs = row.nintendo.on_switch
-              ? toArs(row.nintendo.currency, row.nintendo.price, usdToArs)
-              : undefined;
-            const epicArs = row.epic
-              ? toArs(row.epic.currency, row.epic.final_price, usdToArs)
-              : undefined;
-            const gogArs = row.gog
-              ? toArs(row.gog.currency, row.gog.final_price, usdToArs)
-              : undefined;
-
-            const values = [steamArs, nintendoArs, epicArs, gogArs].filter(
-              (v): v is number => v !== undefined,
-            );
-            const min = values.length > 1 ? Math.min(...values) : undefined;
-
-            return (
-              <div
-                key={row.id}
-                className="card border border-base-300 bg-base-200 shadow-sm"
-              >
-                <figure className="bg-base-100 p-2">
-                  {row.image ? (
-                    <img
-                      src={row.image}
-                      alt={row.name}
-                      loading="lazy"
-                      className="h-auto w-full rounded"
-                    />
-                  ) : (
-                    <div className="flex h-[90px] w-full items-center justify-center font-mono text-xs text-base-content/40">
-                      sin imagen
-                    </div>
-                  )}
-                </figure>
-
-                <div className="card-body gap-2 p-3">
-                  <h3 className="card-title line-clamp-2 text-sm leading-snug">
-                    {row.name}
-                  </h3>
-
-                  <div className="flex flex-col gap-1.5 border-t border-base-300 pt-2">
-                    {row.steam !== undefined && (
-                      <PriceCell
-                        storeLabel="STEAM"
-                        available={!!row.steam?.available}
-                        currency={row.steam?.currency}
-                        finalPrice={row.steam?.final_price}
-                        initialPrice={row.steam?.initial_price}
-                        discountPercent={row.steam?.discount_percent}
-                        isFree={row.steam?.is_free}
-                        unavailableReason={row.steam?.reason}
-                        usdToArs={usdToArs}
-                        isCheapest={isMin(steamArs, min)}
-                      />
-                    )}
-                    <PriceCell
-                      storeLabel="SWITCH AR"
-                      available={row.nintendo.on_switch}
-                      currency={row.nintendo.currency}
-                      finalPrice={row.nintendo.price}
-                      discountPercent={row.nintendo.discount_percent}
-                      isCheapest={isMin(nintendoArs, min)}
-                    />
-                    {row.steam !== undefined && (
-                      <>
-                        <PriceCell
-                          storeLabel="EPIC"
-                          available={!!row.epic}
-                          currency={row.epic?.currency}
-                          finalPrice={row.epic?.final_price}
-                          initialPrice={row.epic?.initial_price}
-                          discountPercent={row.epic?.discount_percent}
-                          usdToArs={usdToArs}
-                          isCheapest={isMin(epicArs, min)}
-                        />
-                        <PriceCell
-                          storeLabel="GOG"
-                          available={!!row.gog}
-                          currency={row.gog?.currency}
-                          finalPrice={row.gog?.final_price}
-                          initialPrice={row.gog?.initial_price}
-                          discountPercent={row.gog?.discount_percent}
-                          usdToArs={usdToArs}
-                          isCheapest={isMin(gogArs, min)}
-                        />
-                      </>
-                    )}
-                  </div>
-
-                  <button
-                    className="btn btn-outline btn-success btn-xs mt-1"
-                    disabled={watchedIds.has(row.id)}
-                    onClick={() => onWatch(row.watchTarget)}
-                  >
-                    {watchedIds.has(row.id) ? "siguiendo" : "+ seguir"}
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      <OfferGrid
+        offers={offers}
+        watchedIds={watchedIds}
+        onWatch={onWatch}
+        usdToArs={usdToArs}
+        emptyMessage={
+          allOffers.length === 0
+            ? "Sin resultados."
+            : "No hay ofertas para las tiendas que tenés activas."
+        }
+      />
     </section>
   );
 }
 
-// Junta matched + steam_only + nintendo_direct en una sola lista de filas.
-// Para lo que vino de Steam, le pega al lado los resultados de Epic/GOG
-// que matcheen por nombre exacto (case-insensitive) -- si no matchea
-// ninguno, la celda queda vacía, no forzamos un match dudoso. Cada fila
-// lleva su watchTarget (steam+appid o nintendo+slug) para que "+ seguir"
-// funcione en cualquiera de los dos casos.
-function buildRows(data: CompareResponse): Row[] {
-  const pcByName = new Map<string, { epic?: PcStoreDeal; gog?: PcStoreDeal }>();
-  for (const d of data.pc_stores) {
-    const key = d.name.trim().toLowerCase();
-    const entry = pcByName.get(key) ?? {};
-    if (d.store === "Epic Games Store") entry.epic = d;
-    else if (d.store === "GOG") entry.gog = d;
-    pcByName.set(key, entry);
-  }
+// Arma una tarjeta POR CADA oferta de CADA tienda (en vez de una tarjeta
+// por juego con varios precios adentro) -- un juego que está en Steam y
+// Switch sale como dos tarjetas separadas, cada una con el color e
+// indicador de su tienda. TODAS las tarjetas llevan tanto "+ seguir"
+// como "ver oferta" (ver OfferGrid: si a una le faltara cualquiera de
+// los dos, no se muestra ninguno, para no mezclar tarjetas con
+// distintas acciones disponibles).
+function buildOffers(data: CompareResponse): Offer[] {
+  const offers: Offer[] = [];
 
-  function toRow(
-    appid: number,
-    name: string,
-    image: string | undefined,
-    steam: Row["steam"],
-    nintendo: Row["nintendo"],
-  ): Row {
-    const pc = pcByName.get(name.trim().toLowerCase());
+  function steamOffer(s: SteamResult, name: string): Offer {
     return {
-      id: `steam:${appid}`,
-      watchTarget: { kind: "steam", appid, name },
+      id: `steam:${s.appid}`,
+      store: "steam",
       name,
-      image: image ?? pc?.epic?.thumb ?? pc?.gog?.thumb,
-      steam,
-      nintendo,
-      epic: pc?.epic,
-      gog: pc?.gog,
+      image: s.tiny_image,
+      available: !!s.price?.available,
+      currency: s.price?.currency,
+      finalPrice: s.price?.final_price,
+      initialPrice: s.price?.initial_price,
+      discountPercent: s.price?.discount_percent,
+      isFree: s.price?.is_free,
+      unavailableReason: s.price?.reason,
+      watchTarget: { kind: "steam", appid: s.appid, name, image: s.tiny_image },
+      dealUrl: `https://store.steampowered.com/app/${s.appid}`,
     };
   }
 
-  const fromMatched: Row[] = data.matched.map((m) =>
-    toRow(
-      m.steam.appid,
-      m.name,
-      m.steam.tiny_image,
-      m.steam.price,
-      m.nintendo,
-    ),
-  );
+  function switchOfferFromMatched(m: MatchedEntry): Offer {
+    return {
+      id: `switch:${m.steam.appid}`,
+      store: "switch",
+      name: m.name,
+      image: m.steam.tiny_image,
+      available: true,
+      currency: m.nintendo.currency,
+      finalPrice: m.nintendo.price,
+      discountPercent: m.nintendo.discount_percent,
+      switch2: m.nintendo.switch2,
+      watchTarget: {
+        kind: "steam",
+        appid: m.steam.appid,
+        name: m.name,
+        image: m.steam.tiny_image,
+      },
+      dealUrl: `https://www.dekudeals.com/app/${m.steam.appid}`,
+    };
+  }
 
-  const fromSteamOnly: Row[] = data.steam_only.map((s) =>
-    toRow(s.appid, s.name, s.tiny_image, s.price, { on_switch: false }),
-  );
-
-  const fromNintendoDirect: Row[] = (data.nintendo_direct ?? []).map((d) => ({
-    id: `nintendo:${d.slug}`,
-    watchTarget: { kind: "nintendo", slug: d.slug, name: d.name },
-    name: d.name,
-    image: d.image,
-    steam: undefined,
-    nintendo: {
-      on_switch: d.available,
+  function switchOfferDirect(d: NintendoDirectResult): Offer {
+    return {
+      id: `switch:${d.slug}`,
+      store: "switch",
+      name: d.name,
+      image: d.image,
+      available: true,
       currency: d.currency,
-      price: d.price,
-    },
-  }));
+      finalPrice: d.price,
+      switch2: d.switch2,
+      watchTarget: { kind: "nintendo", slug: d.slug, name: d.name, image: d.image },
+      dealUrl: `https://www.dekudeals.com/items/${d.slug}`,
+    };
+  }
 
-  return [...fromMatched, ...fromSteamOnly, ...fromNintendoDirect];
+  function pcOffer(p: PcStoreDeal): Offer {
+    const store: StoreKey = p.store === "GOG" ? "gog" : "epic";
+    return {
+      id: `${store}:${p.deal_url}`,
+      store,
+      name: p.name,
+      image: p.thumb,
+      available: true,
+      currency: p.currency,
+      finalPrice: p.final_price,
+      initialPrice: p.initial_price,
+      discountPercent: p.discount_percent,
+      dealUrl: p.deal_url,
+      // Sin game_id (caso raro) la tarjeta queda sin ninguno de los dos
+      // botones (ver OfferGrid): no se puede seguir algo que no se
+      // puede volver a identificar después si deja de salir en esta
+      // búsqueda por nombre.
+      watchTarget: p.game_id
+        ? { kind: "pc", store, gameId: p.game_id, name: p.name, image: p.thumb }
+        : undefined,
+    };
+  }
+
+  for (const m of data.matched) {
+    offers.push(steamOffer(m.steam, m.name));
+    if (m.nintendo.on_switch) offers.push(switchOfferFromMatched(m));
+  }
+
+  for (const s of data.steam_only) {
+    offers.push(steamOffer(s, s.name));
+  }
+
+  for (const d of data.nintendo_direct ?? []) {
+    if (d.available) offers.push(switchOfferDirect(d));
+  }
+
+  for (const p of data.pc_stores) {
+    offers.push(pcOffer(p));
+  }
+
+  // Lo que tiene más descuento primero; dentro del mismo %, orden alfabético.
+  offers.sort((a, b) => {
+    const diff = (b.discountPercent ?? 0) - (a.discountPercent ?? 0);
+    if (diff !== 0) return diff;
+    return a.name.localeCompare(b.name, "es");
+  });
+
+  return offers;
 }

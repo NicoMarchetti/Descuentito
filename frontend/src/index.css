@@ -14,3 +14,39 @@ body {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/* Respaldo: todo cuadrado. Las variables --rounded-* de DaisyUI (ver
+   tailwind.config.js) ya deberían dejar todo sin bordes redondeados,
+   pero esta regla pisa cualquier rounded-* suelto que haya quedado en
+   algún componente, por si acaso. */
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+}
+
+/* Shimmer para las tarjetas "fantasma" de SkeletonGrid (pantalla de
+   carga): un brillo que se desliza de izquierda a derecha en loop,
+   más vivo que un simple pulso de opacidad. */
+.skeleton-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.skeleton-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, currentColor 14%, transparent),
+    transparent
+  );
+  animation: skeleton-shimmer-sweep 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer-sweep {
+  100% {
+    transform: translateX(100%);
+  }
+}

@@ -136,7 +136,7 @@ def steam_price(appid):
 
         overview = data.get("price_overview")
         if not overview:
-            return {"available": False, "reason": "sin price_overview (puede no vender en AR)"}
+            return {"available": False, "reason": "No disponible"}
 
         return {
             "available": True,
@@ -279,6 +279,10 @@ def pc_store_search(query, limit=10):
                 "discount_percent": round(float(d["savings"])),
                 "deal_url": f"https://www.cheapshark.com/redirect?dealID={d['dealID']}",
                 "thumb": d.get("thumb"),
+                # Identifica al JUEGO en sí (no a esta oferta puntual) y no
+                # cambia aunque deje de estar en oferta -- es lo que permite
+                # "seguir" un resultado de Epic/GOG (ver cheapshark_game_deal).
+                "game_id": d.get("gameID"),
             }
             for d in deals
         ]
@@ -328,11 +332,109 @@ def cheapshark_browse_deals(store_name, limit=40):
                 "deal_url": f"https://www.cheapshark.com/redirect?dealID={d['dealID']}",
                 "thumb": d.get("thumb"),
                 "steam_appid": int(d["steamAppID"]) if d.get("steamAppID") else None,
+                "game_id": d.get("gameID"),
             }
             for d in deals
         ]
 
     return cached(f"cheapshark_browse:{store_name}:{limit}", fetch)
+
+
+def cheapshark_game_lookup(game_id):
+    """
+    Trae TODO lo que CheapShark sabe de un juego puntual por su gameID
+    (estable -- no cambia aunque una oferta puntual desaparezca):
+    su posible steamAppID (para cruzar con Steam/Nintendo sin tener que
+    buscar por nombre) y sus ofertas actuales en TODAS las tiendas que
+    trackea CheapShark. Cacheado una sola vez; de acá salen tanto el
+    precio propio (cheapshark_game_deal) como la comparación contra las
+    otras tiendas (cheapshark_game_pc_stores) de un item seguido directo
+    en Epic/GOG.
+    """
+
+    def fetch():
+        try:
+            r = requests.get(
+                "https://www.cheapshark.com/api/1.0/games",
+                params={"id": game_id},
+                headers=HEADERS,
+                timeout=10,
+            )
+            r.raise_for_status()
+            return r.json()
+        except (requests.RequestException, ValueError):
+            return None
+
+    return cached(f"cheapshark_game:{game_id}", fetch)
+
+
+def cheapshark_game_deal(game_id, store_name):
+    """Precio ACTUAL de un juego puntual en UNA tienda puntual (por gameID)."""
+    store_ids = cheapshark_store_ids()
+    store_id = store_ids.get(store_name)
+
+    data = cheapshark_game_lookup(game_id)
+    if not data:
+        return {"available": False}
+
+    info = data.get("info", {})
+    deal = next(
+        (d for d in data.get("deals", []) if d.get("storeID") == store_id), None
+    )
+    if not deal:
+        return {"available": False, "name": info.get("title"), "thumb": info.get("thumb")}
+
+    return {
+        "available": True,
+        "name": info.get("title"),
+        "thumb": info.get("thumb"),
+        "currency": "USD",
+        "initial_price": float(deal.get("retailPrice", 0)),
+        "final_price": float(deal.get("price", 0)),
+        "discount_percent": round(float(deal.get("savings", 0))),
+        "deal_url": f"https://www.cheapshark.com/redirect?dealID={deal['dealID']}",
+    }
+
+
+def cheapshark_game_pc_stores(game_id):
+    """
+    Para un juego seguido DIRECTO en Epic/GOG (kind "pc" en la
+    watchlist): su precio en la/s OTRA/s tienda/s PC que trackea
+    CheapShark para ese mismo gameID, más su steamAppID si lo tiene --
+    así la tarjeta de origen (Epic o GOG) puede venir acompañada de la
+    comparación contra Steam/Switch y la otra tienda PC, igual que pasa
+    con un juego seguido por Steam. Devuelve (lista_de_tiendas, steam_appid).
+    """
+    store_ids = cheapshark_store_ids()
+    id_to_name = {v: k for k, v in store_ids.items()}
+    wanted_ids = {store_ids[n] for n in PC_STORE_NAMES if n in store_ids}
+
+    data = cheapshark_game_lookup(game_id)
+    if not data:
+        return [], None
+
+    info = data.get("info", {})
+    steam_appid = info.get("steamAppID")
+    steam_appid = int(steam_appid) if steam_appid else None
+
+    stores = []
+    for deal in data.get("deals", []):
+        if deal.get("storeID") not in wanted_ids:
+            continue
+        stores.append(
+            {
+                "store": id_to_name.get(deal["storeID"], deal["storeID"]),
+                "name": info.get("title"),
+                "currency": "USD",
+                "initial_price": float(deal.get("retailPrice", 0)),
+                "final_price": float(deal.get("price", 0)),
+                "discount_percent": round(float(deal.get("savings", 0))),
+                "deal_url": f"https://www.cheapshark.com/redirect?dealID={deal['dealID']}",
+                "thumb": info.get("thumb"),
+                "game_id": game_id,
+            }
+        )
+    return stores, steam_appid
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +478,15 @@ _CARD_PRICE_RE = re.compile(r"<strong>([^<]+)</strong>")
 # -- aparece en la ficha de cada juego como "<strong>MSRP:</strong> $X".
 _MSRP_RE = re.compile(r"<strong>MSRP:</strong>\s*\$?\s*([\d.,]+)")
 
+# Heurística para detectar si el juego tiene versión/mejora para Switch 2:
+# busca la mención "Switch 2" en cualquier parte del HTML de la ficha
+# (DekuDeals suele listarlo en la sección de plataformas o en el nombre
+# de la edición, ej. "Nintendo Switch 2 Edition"). NO está verificado a
+# fondo -- puede dar falsos positivos si el texto aparece en otro
+# contexto (una review, un comentario, etc.). Probar contra un juego
+# confirmado con versión Switch 2 antes de confiar en este dato.
+_SWITCH2_RE = re.compile(r"switch\s*2", re.IGNORECASE)
+
 
 
 def dekudeals_search(query, limit=10):
@@ -394,6 +505,11 @@ def dekudeals_search(query, limit=10):
     que intenta capturar las tres cosas encadenadas -- así, si a algún
     juego le falta la imagen (o cualquier otro dato), no rompe el
     resultado entero ni hace que ese campo salga vacío en cascada.
+
+    OJO: esta vista de resultados no trae el HTML completo de la ficha
+    de cada juego (solo la tarjeta resumida), así que acá NO se puede
+    detectar switch2 -- eso solo sale en dekudeals_check/dekudeals_item,
+    que sí traen la página entera.
     """
 
     def fetch():
@@ -488,6 +604,7 @@ def _parse_eshop_ar_from_html(html):
         "currency": data.get("currency", "ARS"),
         "price": final_price,
         "discount_percent": discount_percent,
+        "switch2": bool(_SWITCH2_RE.search(html)),
     }
 
 
@@ -766,7 +883,7 @@ def route_home():
 
     return jsonify(
         {
-            "query": "ofertas destacadas (Steam + Epic + GOG)",
+            "query": " ",
             "matched": matched,
             "steam_only": not_on_switch,
             "pc_stores": pc_results,
@@ -782,51 +899,101 @@ def route_home():
 @app.post("/api/watchlist/deals")
 def route_watchlist_deals():
     """
-    Chequea una lista de juegos -- de Steam contra Steam+Nintendo, de
-    Nintendo-directo solo contra Nintendo (no tiene Steam) -- y devuelve
-    solo los que tienen descuento activo en alguno de los dos.
+    Chequea una lista de juegos -- de Steam contra Steam+Nintendo+Epic/GOG,
+    de Nintendo-directo contra Nintendo+Epic/GOG (no tiene Steam) -- y
+    devuelve el precio actual de CADA uno (esté o no en oferta). Antes
+    esto filtraba y solo devolvía los que tenían descuento activo; ahora
+    devuelve todos, para que la pestaña de seguidos pueda mostrar las
+    mismas tarjetas que la pantalla principal (con precio normal
+    incluido), no solo un listado aparte de ofertas.
+
+    También se suma la comparación contra las OTRAS tiendas para cada
+    item, sea cual sea la tienda por la que lo seguiste: un seguido por
+    Steam o Nintendo-directo se cruza contra Epic/GOG buscando por
+    nombre vía CheapShark; un seguido DIRECTO en Epic/GOG (kind "pc") se
+    consulta por su gameID (no por nombre) y, como CheapShark además
+    sabe su steamAppID cuando existe, también se cruza con Steam/Switch
+    -- así la watchlist compara siempre entre TODAS las tiendas, no solo
+    la que usaste para seguir ese juego.
 
     Sin estado en el server: la watchlist vive en el navegador de cada
     visitante (localStorage), así que acá no se guarda ni se lee nada
     de disco -- el cliente manda la lista entera en el body cada vez.
 
-    Body JSON: {"items": [{"id": "...", "kind": "steam"|"nintendo",
-                            "appid"?: number, "slug"?: string, "name": string}, ...]}
+    Body JSON: {"items": [{"id": "...", "kind": "steam"|"nintendo"|"pc",
+                            "appid"?: number, "slug"?: string,
+                            "store"?: "epic"|"gog", "gameId"?: string,
+                            "name": string}, ...]}
     """
     data = request.get_json(silent=True) or {}
     items = data.get("items", [])
     if not isinstance(items, list):
         return jsonify({"error": "'items' debe ser una lista"}), 400
 
-    results = []
-    for item in items:
-        if item.get("kind") == "steam":
+    def process_one(item):
+        kind = item.get("kind")
+
+        if kind == "steam":
             appid = item.get("appid")
             if not appid:
-                continue
+                return None
             sp = steam_price(appid)
             deku = dekudeals_check(appid)
-        elif item.get("kind") == "nintendo":
+            pc_stores = pc_store_search(item.get("name", ""), limit=3)
+            return {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "steam": sp,
+                "nintendo": deku,
+                "pc_stores": pc_stores,
+            }
+
+        if kind == "nintendo":
             slug = item.get("slug")
             if not slug:
-                continue
-            sp = None
+                return None
             deku = dekudeals_item(slug)
-        else:
-            continue
+            pc_stores = pc_store_search(item.get("name", ""), limit=3)
+            return {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "steam": None,
+                "nintendo": deku,
+                "pc_stores": pc_stores,
+            }
 
-        steam_on_sale = bool(sp and sp.get("available") and sp.get("discount_percent", 0) > 0)
-        nintendo_on_sale = deku.get("on_switch") and deku.get("discount_percent", 0) > 0
+        if kind == "pc":
+            game_id = item.get("gameId")
+            store = item.get("store")
+            store_name = {"epic": "Epic Games Store", "gog": "GOG"}.get(store)
+            if not game_id or not store_name:
+                return None
 
-        if steam_on_sale or nintendo_on_sale:
-            results.append(
-                {
-                    "id": item.get("id"),
-                    "name": item.get("name"),
-                    "steam": sp,
-                    "nintendo": deku,
-                }
-            )
+            pc_deal = cheapshark_game_deal(game_id, store_name)
+            # CheapShark ya sabe (por el mismo gameID) si este juego
+            # también está en la OTRA tienda PC y cuál es su steamAppID
+            # -- con eso se arma la comparación contra Steam/Switch y la
+            # otra tienda, igual que pasa cuando seguís algo por Steam.
+            other_stores, steam_appid = cheapshark_game_pc_stores(game_id)
+            other_stores = [p for p in other_stores if p["store"] != store_name]
+
+            sp = steam_price(steam_appid) if steam_appid else None
+            deku = dekudeals_check(steam_appid) if steam_appid else {"on_switch": False}
+
+            return {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "steam": sp,
+                "nintendo": deku,
+                "pc": pc_deal,
+                "pc_stores": other_stores,
+                "steam_appid": steam_appid,
+            }
+
+        return None
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        results = [r for r in pool.map(process_one, items) if r is not None]
 
     return jsonify(results)
 

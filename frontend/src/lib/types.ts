@@ -21,6 +21,9 @@ export interface NintendoCheck {
   currency?: string;
   price?: number;
   discount_percent?: number;
+  // Heurística (ver app.py): busca "Switch 2" en el HTML de DekuDeals.
+  // No está 100% verificado, puede dar falsos positivos.
+  switch2?: boolean;
 }
 
 export interface MatchedEntry {
@@ -38,6 +41,10 @@ export interface PcStoreDeal {
   discount_percent: number;
   deal_url: string;
   thumb?: string;
+  // Identifica al juego en CheapShark (no a esta oferta puntual); con
+  // esto se puede "seguir" un resultado de Epic/GOG igual que un appid
+  // de Steam o un slug de DekuDeals.
+  game_id?: string;
 }
 
 export interface NintendoDirectResult {
@@ -47,6 +54,7 @@ export interface NintendoDirectResult {
   currency: string;
   available: boolean;
   price?: number;
+  switch2?: boolean;
 }
 
 export interface CompareResponse {
@@ -75,10 +83,17 @@ export interface DolarRate {
 
 export interface WatchlistItem {
   id: string;
-  kind: "steam" | "nintendo";
+  kind: "steam" | "nintendo" | "pc";
   appid?: number;
   slug?: string;
+  // Solo para kind "pc" (seguido directo en Epic/GOG).
+  store?: "epic" | "gog";
+  gameId?: string;
   name: string;
+  // Capturada al momento de tocar "+ seguir" (viene de la tarjeta de
+  // origen), para poder mostrar la tarjeta en "seguidos" sin tener que
+  // volver a buscarla.
+  image?: string;
 }
 
 export interface WatchlistDeal {
@@ -86,4 +101,27 @@ export interface WatchlistDeal {
   name: string;
   steam: SteamPrice | null;
   nintendo: NintendoCheck;
+  // Solo presente cuando el id es un seguido de tipo "pc": precio
+  // actual de ESE juego en ESA tienda (buscado por su gameID, no por
+  // nombre).
+  pc?: {
+    available: boolean;
+    name?: string;
+    thumb?: string;
+    currency?: string;
+    initial_price?: number;
+    final_price?: number;
+    discount_percent?: number;
+    deal_url?: string;
+  };
+  // Epic/GOG encontrados (por nombre si el seguido es Steam/Nintendo, o
+  // por gameID -- la otra tienda PC -- si el seguido es "pc") -- para
+  // poder comparar en "seguidos" contra TODAS las tiendas, no solo la
+  // que usaste para seguirlo.
+  pc_stores?: PcStoreDeal[];
+  // Solo presente cuando el id es un seguido de tipo "pc" Y CheapShark
+  // conoce su steamAppID -- con esto se puede cruzar también contra
+  // Steam/Switch (ver "steam"/"nintendo" arriba, que en ese caso salen
+  // completados usando este appid).
+  steam_appid?: number;
 }
