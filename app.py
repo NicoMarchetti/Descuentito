@@ -795,18 +795,19 @@ def home_candidates(sort="destacadas"):
     en más de una tienda, se completa en un solo candidato con los
     precios que se van encontrando.
 
+    SIN reordenar nada acá (se probaron dos criterios propios -- primero
+    por descuento, después por precio de lista -- y en los dos casos el
+    usuario prefirió sacarlos): el orden final es el orden en que cada
+    fuente va entregando sus resultados. Primero Steam (specials o
+    top_sellers según "sort", tal cual los devuelve su API, sin tocar);
+    los candidatos de Epic/GOG que NO están también en la lista de Steam
+    se agregan al final, en el orden en que los va dando CheapShark.
+
     sort="destacadas" (default): la fuente de Steam son sus OFERTAS
-    actuales (categoría "specials"), y el orden final es por mayor
-    descuento (entre las tres tiendas).
+    actuales (categoría "specials").
 
     sort="mas_vendidas": la fuente de Steam son sus MÁS VENDIDOS ahora
-    mismo (categoría "top_sellers" -- el ranking real de Valve, no
-    inventado acá), y se respeta ESE orden en vez de reordenar por
-    descuento; la mayoría de estos no están en oferta (discount_percent
-    en 0), lo cual es esperable. Epic/GOG no tienen un "más vendidos"
-    público en CheapShark, así que sus candidatos (los que no aparecen
-    también en el top de Steam) se agregan al final, ordenados por
-    descuento como siempre.
+    mismo (categoría "top_sellers" -- el ranking real de Valve).
 
     Solo se conservan candidatos con steam_appid conocido: es el ID que
     usamos para todo (consultar Nintendo, armar la watchlist), así que
@@ -820,7 +821,6 @@ def home_candidates(sort="destacadas"):
 
     def fetch():
         candidates = {}
-        steam_order = []  # orden real de Steam (solo se usa en "mas_vendidas")
 
         def upsert(name, tiny_image, steam_appid, **store_price):
             key = name.strip().lower()
@@ -837,7 +837,7 @@ def home_candidates(sort="destacadas"):
         steam_source = steam_top_sellers() if sort == "mas_vendidas" else steam_deals_all()
 
         for d in steam_source:
-            key = upsert(
+            upsert(
                 d["name"],
                 d["tiny_image"],
                 d["appid"],
@@ -850,7 +850,6 @@ def home_candidates(sort="destacadas"):
                     "discount_percent": d["discount_percent"],
                 },
             )
-            steam_order.append(key)
 
         for d in cheapshark_browse_deals("Epic Games Store", limit=60):
             upsert(d["name"], d["thumb"], d.get("steam_appid"), epic=d)
@@ -858,27 +857,11 @@ def home_candidates(sort="destacadas"):
         for d in cheapshark_browse_deals("GOG", limit=60):
             upsert(d["name"], d["thumb"], d.get("steam_appid"), gog=d)
 
-        with_appid = [c for c in candidates.values() if c["steam_appid"]]
-
-        def best_discount(c):
-            return max(
-                (c[k]["discount_percent"] for k in ("steam", "epic", "gog") if k in c),
-                default=0,
-            )
-
-        if sort == "mas_vendidas":
-            rank = {key: i for i, key in enumerate(steam_order)}
-            last = len(steam_order)
-            with_appid.sort(
-                key=lambda c: (
-                    rank.get(c["name"].strip().lower(), last),
-                    -best_discount(c),
-                )
-            )
-        else:
-            with_appid.sort(key=best_discount, reverse=True)
-
-        return with_appid
+        # candidates.values() ya viene en orden de inserción (dict de
+        # Python 3.7+): primero todo lo de Steam, en el orden en que la
+        # API lo entregó, y después lo que sumó cada vuelta de Epic/GOG
+        # -- no se reordena nada acá.
+        return [c for c in candidates.values() if c["steam_appid"]]
 
     return cached(f"home_candidates:{sort}", fetch)
 

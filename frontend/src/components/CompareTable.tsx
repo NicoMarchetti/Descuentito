@@ -190,17 +190,15 @@ function buildGameGroups(data: CompareResponse): GameGroup[] {
     }
   }
 
-  const list = Array.from(groups.values());
-
-  // Lo que tiene más descuento primero (el mejor renglón de cada
-  // tarjeta); dentro del mismo %, orden alfabético.
-  list.sort((a, b) => {
-    const bestA = a.rows.reduce((max, r) => Math.max(max, r.discountPercent ?? 0), 0);
-    const bestB = b.rows.reduce((max, r) => Math.max(max, r.discountPercent ?? 0), 0);
-    const diff = bestB - bestA;
-    if (diff !== 0) return diff;
-    return a.name.localeCompare(b.name, "es");
-  });
-
-  return list;
+  // SIN ordenar nada acá -- el orden final es el orden en que llegaron
+  // los juegos desde el backend (data.matched, después data.steam_only,
+  // etc., cada uno en el orden en que vino en la respuesta de /api/home
+  // o /api/compare), que es justamente lo que pidió el usuario: nada de
+  // criterios propios del frontend por encima de eso. `groups` es un Map
+  // que ya preserva el orden de la primera vez que se tocó cada juego, así
+  // que alcanza con pasarlo a lista sin tocar nada más. Antes había acá un
+  // sort por % de descuento que pisaba cualquier orden que mandara el
+  // backend -- esa era la causa real de que los juegos "se reordenaran"
+  // en pantalla aunque el backend ya no reordenara nada.
+  return Array.from(groups.values());
 }
