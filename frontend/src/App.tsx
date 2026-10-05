@@ -162,9 +162,9 @@ export default function App() {
   // siempre coincide con la cantidad real de tarjetas en pantalla.
   const visibleCount = result
     ? visibleGameCount(result, {
-        excludeNames: mode === "home" ? destacadosNames : undefined,
-        switchOnly: mode === "home" && switchOnly,
-      })
+      excludeNames: mode === "home" ? destacadosNames : undefined,
+      switchOnly: mode === "home" && switchOnly,
+    })
     : undefined;
 
   // Disclaimer de impuestos: se puede cerrar y queda cerrado (localStorage)
@@ -359,6 +359,7 @@ export default function App() {
           </svg>
           {tab === "seguimiento" ? "volver a ofertas" : `favoritos ${watchedIds.size}`}
         </button>
+        <CafecitoButton />
       </header>
 
       {/* "En mi lista" y el selector de orden ya no están acá -- "En mi
@@ -581,7 +582,7 @@ export default function App() {
       {tab === "seguimiento" && <WatchlistPanel usdToArs={usdToArs} />}
 
       <footer className="mt-12 flex justify-center border-t border-base-300 pt-6">
-        <CafecitoButton />
+
       </footer>
     </div>
   );
