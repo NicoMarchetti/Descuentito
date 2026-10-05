@@ -328,52 +328,14 @@ def steam_global_top_sellers_ranked():
     return _steam_global_chart()["ranked"]
 
 
-def steam_global_top_sellers_deals():
-    """
-    Precio/descuento REAL de cada uno de los juegos del ranking global,
-    consultado con el mismo endpoint que ya usamos para la watchlist
-    (steam_price(), vía appdetails -- probado, no es nada nuevo).
-
-    Esto tapa un hueco real que encontró Nico comparando contra la
-    propia tienda de Steam: "specials" (steam_deals_all(), la categoría
-    curada que usamos como fuente principal) es una lista chica que NO
-    incluye todas las ofertas activas -- juegos grandes como "Warhammer
-    40,000: Space Marine 2" (-75%) o "Forza Horizon 6" (-20%) estaban en
-    oferta de verdad en Steam pero no aparecían ni en "specials" ni en
-    lo que suma CheapShark para Steam. Como el ranking global sí incluye
-    los juegos más jugados/vendidos AHORA mismo (estén o no en oferta),
-    consultar el precio real de cada uno cubre justo a los juegos
-    grandes que las otras dos fuentes se pierden -- y de paso, al venir
-    con su appid real, también quedan bien ubicados cuando el sort
-    "relevancia" los adelanta por estar en este mismo ranking.
-
-    Se descartan acá mismo los que no tienen descuento activo (la
-    mayoría del top 100 no está en oferta) -- esta función es
-    específicamente "ofertas", no "los 100 más vendidos tengan o no
-    descuento".
-    """
-    appids = steam_global_top_sellers_ranked()
-    images = _steam_global_chart()["images"]
-
-    def fetch_one(appid):
-        price = steam_price(appid)
-        if not price.get("available") or price.get("is_free"):
-            return None
-        if not price.get("discount_percent"):
-            return None
-        return {
-            "appid": appid,
-            "name": price.get("name"),
-            "tiny_image": images.get(appid),
-            "currency": price["currency"],
-            "initial_price": price["initial_price"],
-            "final_price": price["final_price"],
-            "discount_percent": price["discount_percent"],
-        }
-
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        results = list(pool.map(fetch_one, appids))
-    return [r for r in results if r]
+# Se probó acá una función steam_global_top_sellers_deals() que pedía,
+# para cada uno de los 100 appids del ranking global, su precio real vía
+# appdetails (steam_price()) -- ~100 pedidos casi simultáneos al mismo
+# dominio de Steam en cada refresco de caché. Bastó para que Akamai (la
+# protección anti-bot de Steam) bloqueara la IP de Nico. Se sacó por
+# completo (ver el comentario en home_candidates, donde se llamaba) --
+# no volver a sumar una fuente que le pegue a store.steampowered.com en
+# ráfaga de muchos pedidos.
 
 
 def steam_deals(limit=30):
@@ -1150,25 +1112,21 @@ def home_candidates(sort="descuento", only_discounted=False):
                     },
                 )
 
-            # Tercera fuente de Steam: precio real de cada juego del
-            # ranking global de más vendidos (ver steam_global_top_sellers_deals
-            # más arriba) -- cubre juegos grandes en oferta que ni
-            # "specials" ni CheapShark tenían (caso real: Warhammer
-            # 40,000: Space Marine 2, Forza Horizon 6).
-            for d in steam_global_top_sellers_deals():
-                upsert(
-                    d["name"],
-                    d["tiny_image"],
-                    d["appid"],
-                    steam={
-                        "available": True,
-                        "is_free": False,
-                        "currency": d["currency"],
-                        "initial_price": d["initial_price"],
-                        "final_price": d["final_price"],
-                        "discount_percent": d["discount_percent"],
-                    },
-                )
+            # Se probó sumar acá una tercera fuente de Steam
+            # (steam_global_top_sellers_deals, pedía el precio real de
+            # cada uno de los 100 del ranking global vía appdetails) para
+            # cubrir juegos grandes en oferta que ni "specials" ni
+            # CheapShark tenían (caso real: Warhammer 40,000: Space
+            # Marine 2, Forza Horizon 6). SE REVIRTIÓ: son ~100 pedidos
+            # casi simultáneos (ThreadPoolExecutor) al mismo dominio de
+            # Steam en cada refresco de caché, y eso bastó para que
+            # Akamai (la protección anti-bot de Steam) bloqueara la IP de
+            # Nico ("Access Denied" / errors.edgesuite.net) -- un
+            # bloqueo temporal, no legal, pero real. No volver a sumar
+            # fuentes que llamen a store.steampowered.com en ráfaga de
+            # muchos pedidos; steam_price() en sí sigue siendo seguro
+            # para la watchlist (un pedido genuino por vez, disparado por
+            # el usuario), el problema fue pedir 100 juntos.
 
         with_appid = [c for c in candidates.values() if c["steam_appid"]]
 
