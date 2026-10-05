@@ -99,13 +99,28 @@ export function GameGroupGrid({ groups, watchedIds, onWatch, usdToArs, emptyMess
             key={g.id}
             className="card overflow-hidden border border-base-300 bg-base-200 shadow-sm"
           >
+            {/* aspect-[16/9] fijo: SIN esto, el div arranca con altura 0
+                (no tiene imagen todavía, loading="lazy") y cuando la
+                imagen termina de cargar -- mientras hacés scroll -- la
+                tarjeta "salta" y empuja todo lo de abajo más abajo. Con
+                un alto reservado de entrada, el lugar de la imagen ya
+                está ahí aunque todavía no haya cargado, así que nada se
+                mueve cuando sí carga. */}
             <div className=" w-full bg-base-100">
               {g.image ? (
                 <img
                   src={g.image}
                   alt={g.name}
                   loading="lazy"
-                  className="h-full w-full object-cover"
+                  // object-cover: llena el recuadro entero sin bandas
+                  // negras -- las imágenes que mandan las APIs vienen en
+                  // proporciones muy distintas entre sí (banners anchos
+                  // de Epic/GOG, capsules de Steam, boxart a veces
+                  // vertical de Switch), así que algo SIEMPRE se recorta
+                  // un poco; "object-position: top" prioriza que no se
+                  // corte el título/arte principal, que casi siempre
+                  // está arriba o centrado.
+                  className="h-full w-full object-cover object-top"
                 />
               ) : (
                 <div className="flex h-full w-full items-center justify-center font-mono text-xs text-base-content/40">

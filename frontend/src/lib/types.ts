@@ -13,6 +13,12 @@ export interface SteamResult {
   name: string;
   tiny_image?: string;
   price?: SteamPrice;
+  // Solo viene en /api/home (paginado): posición real de este candidato
+  // en la lista COMPLETA, no solo en esta página -- ver el comentario en
+  // route_home (app.py) y en buildGameGroups (CompareTable.tsx) sobre por
+  // qué hace falta para fusionar "matched"/"steam_only" en el orden
+  // correcto. /api/compare no lo manda (no hace falta: no se pagina).
+  order?: number;
 }
 
 export interface NintendoCheck {
@@ -57,6 +63,15 @@ export interface NintendoDirectResult {
   switch2?: boolean;
 }
 
+// Conteos para el sidebar de filtros de /api/home -- "cuántas ofertas
+// quedarían si además marcás esta tienda/este descuento mínimo", ya
+// calculados sobre el pool completo (antes de paginar) con el resto de
+// los filtros activos aplicados. Ver home_facets en app.py.
+export interface HomeFacets {
+  stores: { steam?: number; epic?: number; gog?: number };
+  discount: { "50"?: number; "70"?: number; "90"?: number };
+}
+
 export interface CompareResponse {
   query: string;
   matched: MatchedEntry[];
@@ -70,6 +85,7 @@ export interface CompareResponse {
   page_size?: number;
   total?: number;
   has_more?: boolean;
+  facets?: HomeFacets;
 }
 
 export interface DolarRate {

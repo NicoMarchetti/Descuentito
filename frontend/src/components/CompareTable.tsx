@@ -16,10 +16,34 @@ interface Props {
   onWatch: (target: WatchTarget) => void;
   watchedIds: Set<string>;
   usdToArs?: number;
-  /** "all" (o no venir) muestra todas las tiendas; una StoreKey puntual muestra solo esa. */
-  storeFilter?: StoreKey | "all";
   /** Encabezado "RESULTADOS PARA ..." -- solo tiene sentido cuando el usuario hizo una búsqueda, no al cargar la pantalla de inicio. */
   searchQuery?: string;
+  /** Nombres (normalizados, ver featuredGameNames en FeaturedCarousel) a
+   * NO mostrar acá -- los juegos que ya salen en "Destacados" arriba no
+   * se repiten en la grilla general, si no pierde la gracia de ser
+   * "destacado". Solo tiene sentido en la home (en resultados de
+   * búsqueda no hay sección de destacados). */
+  excludeNames?: Set<string>;
+  /** true cuando el filtro "Switch" del sidebar está activo -- a
+   * diferencia de steam/epic/gog (que el backend ya filtra antes de
+   * paginar), esto filtra del lado del cliente, solo entre lo que YA
+   * está cargado (ver el comentario largo en App.tsx sobre por qué). */
+  switchOnly?: boolean;
+}
+
+/** Mismo filtrado que hace CompareTable (destacados excluidos + Switch si
+ * corresponde), pero expuesto aparte para que App.tsx pueda mostrar un
+ * contador ("N ofertas encontradas") que coincida con lo que realmente se
+ * ve en la grilla -- antes ese número salía de result.total (el total del
+ * backend, sin la exclusión de destacados), así que no coincidía con la
+ * cantidad real de tarjetas visibles. */
+export function visibleGameCount(
+  data: CompareResponse,
+  options?: { excludeNames?: Set<string>; switchOnly?: boolean },
+): number {
+  return buildGameGroups(data)
+    .filter((g) => !options?.excludeNames?.has(g.id))
+    .filter((g) => !options?.switchOnly || g.rows.some((r) => r.store === "switch")).length;
 }
 
 export function CompareTable({
@@ -27,21 +51,13 @@ export function CompareTable({
   onWatch,
   watchedIds,
   usdToArs,
-  storeFilter,
   searchQuery,
+  excludeNames,
+  switchOnly,
 }: Props) {
-  const allGroups = buildGameGroups(data);
-
-  // El filtro por tienda no saca tarjetas enteras: dentro de cada juego
-  // que SÍ está en esa tienda, deja solo el renglón de esa tienda (las
-  // demás comparaciones se ocultan, no tiene sentido mostrarlas si elegiste
-  // ver "solo Steam").
-  const groups =
-    storeFilter && storeFilter !== "all"
-      ? allGroups
-        .filter((g) => g.rows.some((r) => r.store === storeFilter))
-        .map((g) => ({ ...g, rows: g.rows.filter((r) => r.store === storeFilter) }))
-      : allGroups;
+  const groups = buildGameGroups(data)
+    .filter((g) => !excludeNames?.has(g.id))
+    .filter((g) => !switchOnly || g.rows.some((r) => r.store === "switch"));
 
   return (
     <section className="mb-10">
@@ -56,11 +72,7 @@ export function CompareTable({
         watchedIds={watchedIds}
         onWatch={onWatch}
         usdToArs={usdToArs}
-        emptyMessage={
-          allGroups.length === 0
-            ? "Sin resultados."
-            : "No hay ofertas para las tiendas que tenés activas."
-        }
+        emptyMessage="Sin resultados."
       />
     </section>
   );
@@ -122,35 +134,70 @@ function buildGameGroups(data: CompareResponse): GameGroup[] {
     };
   }
 
-  for (const m of data.matched) {
-    const g = getGroup(m.name);
-    setImage(g, m.steam.tiny_image);
-    addRow(g, steamRow(m.steam));
-    setTarget(g, {
-      kind: "steam",
-      appid: m.steam.appid,
-      name: m.name,
-      image: m.steam.tiny_image,
-    });
+  // Antes esto procesaba TODO "data.matched" primero y recién después
+  // TODO "data.steam_only" -- son dos arrays separados, y como el scroll
+  // infinito los va acumulando por separado en cada página (ver
+  // handleLoadMore en App.tsx), un juego CON versión de Switch cargado en
+  // una página más nueva terminaba arriba de uno SIN Switch que ya se
+  // había mostrado desde una página anterior, aunque ese llegó antes: el
+  // usuario veía la grilla "reacomodarse" cada vez que cargaba más. Con el
+  // índice "order" que manda /api/home (posición real en la lista
+  // completa, no por página), se intercalan ambos arrays respetando ese
+  // orden real en vez del orden en que los separó la respuesta. En
+  // /api/compare (búsqueda manual, sin paginar) "order" no viene -- el
+  // fallback (offset grande para steam_only) mantiene el comportamiento
+  // de antes ahí, donde nunca fue un problema porque no se acumula nada.
+  type SteamEntry =
+    | { kind: "matched"; order: number; item: (typeof data.matched)[number] }
+    | { kind: "steam_only"; order: number; item: (typeof data.steam_only)[number] };
 
-    if (m.nintendo.on_switch) {
-      addRow(g, {
-        key: `switch:${m.steam.appid}`,
-        store: "switch",
-        available: true,
-        currency: m.nintendo.currency,
-        finalPrice: m.nintendo.price,
-        discountPercent: m.nintendo.discount_percent,
-        dealUrl: `https://www.dekudeals.com/app/${m.steam.appid}`,
+  const STEAM_ONLY_FALLBACK_OFFSET = 1_000_000;
+
+  const steamEntries: SteamEntry[] = [
+    ...data.matched.map(
+      (item, i): SteamEntry => ({ kind: "matched", order: item.steam.order ?? i, item }),
+    ),
+    ...data.steam_only.map(
+      (item, i): SteamEntry => ({
+        kind: "steam_only",
+        order: item.order ?? STEAM_ONLY_FALLBACK_OFFSET + i,
+        item,
+      }),
+    ),
+  ];
+  steamEntries.sort((a, b) => a.order - b.order);
+
+  for (const entry of steamEntries) {
+    if (entry.kind === "matched") {
+      const m = entry.item;
+      const g = getGroup(m.name);
+      setImage(g, m.steam.tiny_image);
+      addRow(g, steamRow(m.steam));
+      setTarget(g, {
+        kind: "steam",
+        appid: m.steam.appid,
+        name: m.name,
+        image: m.steam.tiny_image,
       });
-    }
-  }
 
-  for (const s of data.steam_only) {
-    const g = getGroup(s.name);
-    setImage(g, s.tiny_image);
-    addRow(g, steamRow(s));
-    setTarget(g, { kind: "steam", appid: s.appid, name: s.name, image: s.tiny_image });
+      if (m.nintendo.on_switch) {
+        addRow(g, {
+          key: `switch:${m.steam.appid}`,
+          store: "switch",
+          available: true,
+          currency: m.nintendo.currency,
+          finalPrice: m.nintendo.price,
+          discountPercent: m.nintendo.discount_percent,
+          dealUrl: `https://www.dekudeals.com/app/${m.steam.appid}`,
+        });
+      }
+    } else {
+      const s = entry.item;
+      const g = getGroup(s.name);
+      setImage(g, s.tiny_image);
+      addRow(g, steamRow(s));
+      setTarget(g, { kind: "steam", appid: s.appid, name: s.name, image: s.tiny_image });
+    }
   }
 
   for (const d of data.nintendo_direct ?? []) {
@@ -196,9 +243,6 @@ function buildGameGroups(data: CompareResponse): GameGroup[] {
   // o /api/compare), que es justamente lo que pidió el usuario: nada de
   // criterios propios del frontend por encima de eso. `groups` es un Map
   // que ya preserva el orden de la primera vez que se tocó cada juego, así
-  // que alcanza con pasarlo a lista sin tocar nada más. Antes había acá un
-  // sort por % de descuento que pisaba cualquier orden que mandara el
-  // backend -- esa era la causa real de que los juegos "se reordenaran"
-  // en pantalla aunque el backend ya no reordenara nada.
+  // que alcanza con pasarlo a lista sin tocar nada más.
   return Array.from(groups.values());
 }
