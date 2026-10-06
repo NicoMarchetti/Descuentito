@@ -366,15 +366,28 @@ def _refresh_steam_global_deals():
             if price.get("available") and not price.get("is_free") and price.get(
                 "discount_percent"
             ):
+                # De paso, acá mismo (NO en route_home) se chequea si este
+                # juego está también en Epic/GOG -- ver pc_store_exact_matches
+                # más abajo. Esto reemplaza una versión anterior que hacía
+                # esta misma consulta a CheapShark por cada candidato, en
+                # cada página que pedía CUALQUIER visitante (10 en paralelo,
+                # con max_workers=10) -- eso fue lo que terminó baneando a
+                # Nico de CheapShark ("me estan baneando todo el rato").
+                # Acá, en cambio, es UN pedido más por item, metido en el
+                # mismo loop secuencial-con-pausas que ya existe para Steam
+                # (se hace una vez por día, no una vez por página vista).
+                name = price.get("name")
+                pc_stores = pc_store_exact_matches(name, limit=10) if name else []
                 results.append(
                     {
                         "appid": appid,
-                        "name": price.get("name"),
+                        "name": name,
                         "tiny_image": images.get(appid),
                         "currency": price["currency"],
                         "initial_price": price["initial_price"],
                         "final_price": price["final_price"],
                         "discount_percent": price["discount_percent"],
+                        "pc_stores": pc_stores,
                     }
                 )
             if i < len(appids) - 1:
@@ -1254,6 +1267,12 @@ def home_candidates(sort="descuento", only_discounted=False):
             # que a esta altura ya está resuelto por un hilo de fondo, no
             # por este pedido -- ver steam_global_top_sellers_deals().
             for d in steam_global_top_sellers_deals():
+                extra = {}
+                for p in d.get("pc_stores", []):
+                    if p["store"] == "Epic Games Store":
+                        extra["epic"] = p
+                    elif p["store"] == "GOG":
+                        extra["gog"] = p
                 upsert(
                     d["name"],
                     d.get("tiny_image"),
@@ -1266,6 +1285,7 @@ def home_candidates(sort="descuento", only_discounted=False):
                         "final_price": d["final_price"],
                         "discount_percent": d["discount_percent"],
                     },
+                    **extra,
                 )
 
         with_appid = [c for c in candidates.values() if c["steam_appid"]]
@@ -1551,31 +1571,34 @@ def route_home():
     start = (page - 1) * page_size
     page_candidates = all_candidates[start : start + page_size]
 
+    # OJO -- se probó acá (y en /api/compare) hacer una búsqueda en vivo
+    # contra CheapShark por cada candidato de cada página (pc_store_exact_
+    # matches, el mismo mecanismo que usa la búsqueda manual) para que un
+    # juego en Epic/GOG a precio NORMAL (sin descuento propio ahí) también
+    # saliera en la grilla principal, no solo buscándolo a mano. SE SACÓ:
+    # con 8 candidatos por página y hasta 10 en paralelo (ThreadPoolExecutor
+    # más abajo), cada scroll/carga de la home disparaba una ráfaga de
+    # pedidos a CheapShark -- multiplicado por cualquier visitante mirando
+    # la home, eso terminó baneando a Nico de CheapShark ("me estan
+    # baneando todo el rato"), mismo tipo de problema que ya había pasado
+    # con Steam/Akamai. En vez de pedirlo por página (automático, sin
+    # límite real de frecuencia), ese chequeo de Epic/GOG ahora se hace
+    # SOLO para los juegos del top 100 global de Steam, una vez por día,
+    # como parte del mismo refresco secuencial-con-pausas que ya existe
+    # para sus precios (ver _refresh_steam_global_deals) -- de ahí sale
+    # directo en las claves "epic"/"gog" del candidato, igual que antes.
     def enrich(c):
         appid = c["steam_appid"]
         sp = c.get("steam") or steam_price(appid)
         deku = dekudeals_check(appid)
-        # Búsqueda en vivo por nombre contra CheapShark (Epic + GOG),
-        # MISMO mecanismo que ya usa /api/compare (compare_steam_results,
-        # ver pc_store_search) -- antes acá se usaban en cambio las claves
-        # "epic"/"gog" del candidato, que salen de cheapshark_browse_deals
-        # (home_candidates), un barrido con onSale=1: solo trae un juego
-        # si ADEMÁS tiene una oferta propia activa en esa tienda puntual.
-        # Resultado: un juego que está en GOG pero a precio normal (sin
-        # descuento ahí) nunca aparecía en la grilla principal, aunque
-        # buscándolo por nombre sí salía (bien detectado por Nico: "si
-        # los busco si aparecen, en la grilla no"). pc_store_search no
-        # filtra por descuento, así que ahora la grilla principal se
-        # comporta igual que la búsqueda para esto.
-        pc = pc_store_exact_matches(c["name"], limit=10)
-        return c, sp, deku, pc
+        return c, sp, deku
 
     matched = []
     not_on_switch = []
     pc_results = []
 
     with ThreadPoolExecutor(max_workers=10) as pool:
-        for i, (c, sp, deku, pc) in enumerate(pool.map(enrich, page_candidates)):
+        for i, (c, sp, deku) in enumerate(pool.map(enrich, page_candidates)):
             steam_result = {
                 "appid": c["steam_appid"],
                 "name": c["name"],
@@ -1602,8 +1625,10 @@ def route_home():
             else:
                 not_on_switch.append(steam_result)
 
-            for p in pc:
-                pc_results.append({**p, "name": c["name"]})
+            if "epic" in c:
+                pc_results.append({**c["epic"], "name": c["name"]})
+            if "gog" in c:
+                pc_results.append({**c["gog"], "name": c["name"]})
 
     return jsonify(
         {

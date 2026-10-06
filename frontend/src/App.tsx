@@ -8,6 +8,7 @@ import { CafecitoButton } from "./components/CafecitoButton";
 import { HeroSkeleton, SkeletonGrid } from "./components/SkeletonGrid";
 import { FeaturedCarousel, featuredGameNames } from "./components/FeaturedCarousel";
 import { FilterSidebar } from "./components/FilterSidebar";
+import pageIcon from "../src/assets/icons/icon.png";
 
 type Tab = "comparar" | "seguimiento";
 type Mode = "home" | "search";
@@ -327,13 +328,17 @@ export default function App() {
   return (
     <div className="min-h-screen px-6 py-8 md:px-10 lg:px-14">
       <header className="mb-6 flex flex-wrap items-center gap-4 border-b border-base-300 pb-4">
-        <div onClick={backToHome} className="flex cursor-pointer flex-col shrink-0">
-          <h1 className="text-xl font-bold uppercase tracking-wide text-primary">
-            DESCUENTITO
-          </h1>
-          <span className="font-mono text-[0.65rem] uppercase tracking-wide text-base-content/40">
-            Jugá al mejor precio
-          </span>
+
+        <div onClick={backToHome} className="flex cursor-pointer items-center gap-2 shrink-0">
+          <img src={pageIcon} alt="Descuentito" className="w-10" />
+          <div className="flex flex-col">
+            <h1 className="text-xl font-bold uppercase tracking-wide text-primary">
+              DESCUENTITO
+            </h1>
+            <span className="font-mono text-[0.65rem] uppercase tracking-wide text-base-content/40">
+              Jugá al mejor precio
+            </span>
+          </div>
         </div>
 
         {/* El buscador se movió al sidebar (ver FilterSidebar) -- queda
