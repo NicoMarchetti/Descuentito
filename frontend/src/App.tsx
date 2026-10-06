@@ -330,7 +330,7 @@ export default function App() {
       <header className="mb-6 flex flex-wrap items-center gap-4 border-b border-base-300 pb-4">
 
         <div onClick={backToHome} className="flex cursor-pointer items-center gap-2 shrink-0">
-          <img src={pageIcon} alt="Descuentito" className="w-10" />
+          <img src={pageIcon} alt="Descuentito" className="w-12" />
           <div className="flex flex-col">
             <h1 className="text-xl font-bold uppercase tracking-wide text-primary">
               DESCUENTITO
