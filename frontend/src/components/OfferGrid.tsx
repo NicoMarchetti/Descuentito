@@ -106,7 +106,7 @@ export function GameGroupGrid({ groups, watchedIds, onWatch, usdToArs, emptyMess
                 un alto reservado de entrada, el lugar de la imagen ya
                 está ahí aunque todavía no haya cargado, así que nada se
                 mueve cuando sí carga. */}
-            <div className=" w-full bg-base-100">
+            <div className="  w-full bg-base-100">
               {g.image ? (
                 <img
                   src={g.image}

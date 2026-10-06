@@ -44,6 +44,7 @@ Correr:
 """
 
 import json
+import random
 import re
 import threading
 import time
@@ -90,11 +91,13 @@ _CACHE_LOCKS = {}
 _CACHE_LOCKS_GUARD = threading.Lock()
 
 
-def cached(key, fetch_fn):
+def cached(key, fetch_fn, ttl=None):
+    if ttl is None:
+        ttl = CACHE_TTL_SECONDS
     now = time.time()
     if key in _CACHE:
         ts, data = _CACHE[key]
-        if now - ts < CACHE_TTL_SECONDS:
+        if now - ts < ttl:
             return data
 
     with _CACHE_LOCKS_GUARD:
@@ -107,7 +110,7 @@ def cached(key, fetch_fn):
         # una versión distinta de la misma fuente).
         if key in _CACHE:
             ts, data = _CACHE[key]
-            if time.time() - ts < CACHE_TTL_SECONDS:
+            if time.time() - ts < ttl:
                 return data
         data = fetch_fn()
         _CACHE[key] = (time.time(), data)
@@ -328,14 +331,79 @@ def steam_global_top_sellers_ranked():
     return _steam_global_chart()["ranked"]
 
 
-# Se probó acá una función steam_global_top_sellers_deals() que pedía,
-# para cada uno de los 100 appids del ranking global, su precio real vía
-# appdetails (steam_price()) -- ~100 pedidos casi simultáneos al mismo
+# Se probó una primera versión de esto que pedía, para cada uno de los
+# appids del ranking global, su precio real vía appdetails (steam_price())
+# con un ThreadPoolExecutor -- ~100 pedidos CASI SIMULTÁNEOS al mismo
 # dominio de Steam en cada refresco de caché. Bastó para que Akamai (la
-# protección anti-bot de Steam) bloqueara la IP de Nico. Se sacó por
-# completo (ver el comentario en home_candidates, donde se llamaba) --
-# no volver a sumar una fuente que le pegue a store.steampowered.com en
-# ráfaga de muchos pedidos.
+# protección anti-bot de Steam) bloqueara la IP de Nico ("Access Denied" /
+# errors.edgesuite.net) -- un bloqueo temporal, no legal, pero real.
+#
+# Esta versión reemplaza esa: los mismos ~100 pedidos (el ranking global
+# completo, no un recorte) pero SECUENCIALES (uno por vez, nunca en
+# paralelo) con una pausa random de 1.5 a 3.5 segundos entre cada uno, y
+# cacheados 24hs -- se hace como mucho una vez por día, no cada vez que
+# vence la cache corta de 5 minutos del resto del sitio. Para que ningún
+# pedido de un usuario tenga que esperar esos ~100 pedidos secuenciales
+# (varios minutos en total), el refresco corre en un hilo de fondo
+# separado: mientras no termina, se sigue devolviendo lo que ya estaba
+# cacheado (o una lista vacía, la primera vez que arranca el server).
+STEAM_GLOBAL_DEALS_TOP_N = 100
+STEAM_GLOBAL_DEALS_TTL = 24 * 60 * 60  # 1 vez por día
+
+_steam_global_deals_cache = {"data": [], "ts": 0.0}
+_steam_global_deals_refreshing = False
+_steam_global_deals_lock = threading.Lock()
+
+
+def _refresh_steam_global_deals():
+    global _steam_global_deals_refreshing
+    try:
+        appids = steam_global_top_sellers_ranked()[:STEAM_GLOBAL_DEALS_TOP_N]
+        images = _steam_global_chart()["images"]
+        results = []
+        for i, appid in enumerate(appids):
+            price = steam_price(appid)
+            if price.get("available") and not price.get("is_free") and price.get(
+                "discount_percent"
+            ):
+                results.append(
+                    {
+                        "appid": appid,
+                        "name": price.get("name"),
+                        "tiny_image": images.get(appid),
+                        "currency": price["currency"],
+                        "initial_price": price["initial_price"],
+                        "final_price": price["final_price"],
+                        "discount_percent": price["discount_percent"],
+                    }
+                )
+            if i < len(appids) - 1:
+                time.sleep(random.uniform(1.5, 3.5))
+        with _steam_global_deals_lock:
+            _steam_global_deals_cache["data"] = results
+            _steam_global_deals_cache["ts"] = time.time()
+    finally:
+        _steam_global_deals_refreshing = False
+
+
+def steam_global_top_sellers_deals():
+    """
+    Precio real (con descuento activo) de los juegos del ranking global de
+    más vendidos -- esto es lo que permite que un juego grande como
+    Warhammer 40,000: Space Marine 2 o Forza Horizon 6 aparezca en el pool
+    general aunque no esté en "specials" de Steam ni en lo que trae
+    CheapShark. Ver el comentario grande arriba de STEAM_GLOBAL_DEALS_TOP_N
+    sobre por qué esto es secuencial-con-pausas y se cachea 24hs, no cada
+    5 minutos como el resto.
+    """
+    global _steam_global_deals_refreshing
+    stale = time.time() - _steam_global_deals_cache["ts"] > STEAM_GLOBAL_DEALS_TTL
+    if stale and not _steam_global_deals_refreshing:
+        with _steam_global_deals_lock:
+            if not _steam_global_deals_refreshing:
+                _steam_global_deals_refreshing = True
+                threading.Thread(target=_refresh_steam_global_deals, daemon=True).start()
+    return _steam_global_deals_cache["data"]
 
 
 def steam_deals(limit=30):
@@ -453,6 +521,27 @@ def pc_store_search(query, limit=10):
         ]
 
     return cached(f"pc_store_search:{query}:{limit}", fetch)
+
+
+def pc_store_exact_matches(name, limit=10):
+    """
+    Mismo pc_store_search, pero descarta lo que NO sea el juego pedido.
+    CheapShark busca por título de forma difusa (sortBy=Title, sin exigir
+    coincidencia exacta) -- buscar "Bodycam" también trae sus DLCs
+    ("Bodycam - Supporter Pack", bundles, etc.), que CheapShark lista como
+    juegos aparte con su propio precio. Eso es útil cuando el USUARIO
+    busca a mano (quiere ver variantes relacionadas), pero cuando esto se
+    usa para cruzar automáticamente "este candidato también está en
+    Epic/GOG" (route_home, compare_steam_results), un DLC se mostraba
+    como si fuera una oferta más del juego -- falso positivo (reportado
+    por Nico: "aparecen listados los DLC"). Acá se compara el nombre
+    normalizado (mismo criterio que upsert en home_candidates) y solo se
+    devuelve lo que matchea EXACTO.
+    """
+    target = name.strip().lower()
+    return [
+        p for p in pc_store_search(name, limit=limit) if p["name"].strip().lower() == target
+    ]
 
 
 CHEAPSHARK_PAGE_SIZE = 60  # tope real de la API de CheapShark -- pedir más por página no funciona, hay que paginar.
@@ -893,6 +982,43 @@ def route_dolar():
     return jsonify(dolar_rates())
 
 
+@app.get("/api/debug/steam-chart")
+def route_debug_steam_chart():
+    """
+    Diagnóstico para chequear, SIN tener que leer logs del server, si el
+    scraping del ranking real (steam_global_top_sellers_ranked, el que
+    arma sort="relevancia") está funcionando -- si "ranked_count" da 0,
+    el pedido a Steam está fallando (bloqueado, timeout, o cambió el
+    HTML y el regex ya no encuentra nada) y por eso la home vuelve a
+    quedar en el orden "de siempre" sin el top real aplicado encima.
+    "top5" y "top5_names" dejan ver A OJO si lo que trajo es realmente
+    el top 100 de ahora (comparar contra
+    store.steampowered.com/charts/topselling/global en el navegador).
+    """
+    chart = _steam_global_chart()
+    ranked = chart["ranked"]
+    top5 = ranked[:5]
+    top5_names = []
+    for appid in top5:
+        price = steam_price(appid)
+        top5_names.append(price.get("name") or f"appid {appid}")
+    deals_cache_age_sec = (
+        round(time.time() - _steam_global_deals_cache["ts"])
+        if _steam_global_deals_cache["ts"]
+        else None
+    )
+    return jsonify(
+        {
+            "ranked_count": len(ranked),
+            "top5": top5,
+            "top5_names": top5_names,
+            "global_deals_cached_count": len(_steam_global_deals_cache["data"]),
+            "global_deals_cache_age_sec": deals_cache_age_sec,
+            "global_deals_refreshing_now": _steam_global_deals_refreshing,
+        }
+    )
+
+
 
 @app.get("/api/nintendo/check/<int:steam_appid>")
 def route_nintendo_check(steam_appid):
@@ -917,7 +1043,11 @@ def compare_steam_results(steam_results, with_prices=True):
     def process_one(s):
         sp = s.get("price") if not with_prices else steam_price(s["appid"])
         deku = dekudeals_check(s["appid"])
-        pc = pc_store_search(s["name"], limit=3)
+        # pc_store_exact_matches, no pc_store_search directo -- mismo
+        # motivo que en route_home (ver el comentario grande ahí): sin
+        # filtrar, CheapShark también trae DLCs/bundles con título
+        # parecido como si fueran el juego mismo.
+        pc = pc_store_exact_matches(s["name"], limit=10)
         return s, sp, deku, pc
 
     matched = []
@@ -1112,21 +1242,31 @@ def home_candidates(sort="descuento", only_discounted=False):
                     },
                 )
 
-            # Se probó sumar acá una tercera fuente de Steam
-            # (steam_global_top_sellers_deals, pedía el precio real de
-            # cada uno de los 100 del ranking global vía appdetails) para
-            # cubrir juegos grandes en oferta que ni "specials" ni
-            # CheapShark tenían (caso real: Warhammer 40,000: Space
-            # Marine 2, Forza Horizon 6). SE REVIRTIÓ: son ~100 pedidos
-            # casi simultáneos (ThreadPoolExecutor) al mismo dominio de
-            # Steam en cada refresco de caché, y eso bastó para que
-            # Akamai (la protección anti-bot de Steam) bloqueara la IP de
-            # Nico ("Access Denied" / errors.edgesuite.net) -- un
-            # bloqueo temporal, no legal, pero real. No volver a sumar
-            # fuentes que llamen a store.steampowered.com en ráfaga de
-            # muchos pedidos; steam_price() en sí sigue siendo seguro
-            # para la watchlist (un pedido genuino por vez, disparado por
-            # el usuario), el problema fue pedir 100 juntos.
+            # Tercera fuente de Steam: el precio real de los juegos del
+            # ranking GLOBAL de más vendidos (steam_global_top_sellers_deals,
+            # ver el comentario grande junto a su definición) -- cubre
+            # juegos grandes en oferta que ni "specials" ni CheapShark
+            # tenían (caso real: Warhammer 40,000: Space Marine 2, Forza
+            # Horizon 6, que estaban en oferta en Steam pero no aparecían
+            # en el pool). Esta vez SIN el problema de la primera versión
+            # (ráfaga de pedidos paralelos que terminó bloqueando la IP de
+            # Nico): acá se pide secuencial con pausas y se cachea 24hs, así
+            # que a esta altura ya está resuelto por un hilo de fondo, no
+            # por este pedido -- ver steam_global_top_sellers_deals().
+            for d in steam_global_top_sellers_deals():
+                upsert(
+                    d["name"],
+                    d.get("tiny_image"),
+                    d["appid"],
+                    steam={
+                        "available": True,
+                        "is_free": False,
+                        "currency": d["currency"],
+                        "initial_price": d["initial_price"],
+                        "final_price": d["final_price"],
+                        "discount_percent": d["discount_percent"],
+                    },
+                )
 
         with_appid = [c for c in candidates.values() if c["steam_appid"]]
 
@@ -1415,14 +1555,27 @@ def route_home():
         appid = c["steam_appid"]
         sp = c.get("steam") or steam_price(appid)
         deku = dekudeals_check(appid)
-        return c, sp, deku
+        # Búsqueda en vivo por nombre contra CheapShark (Epic + GOG),
+        # MISMO mecanismo que ya usa /api/compare (compare_steam_results,
+        # ver pc_store_search) -- antes acá se usaban en cambio las claves
+        # "epic"/"gog" del candidato, que salen de cheapshark_browse_deals
+        # (home_candidates), un barrido con onSale=1: solo trae un juego
+        # si ADEMÁS tiene una oferta propia activa en esa tienda puntual.
+        # Resultado: un juego que está en GOG pero a precio normal (sin
+        # descuento ahí) nunca aparecía en la grilla principal, aunque
+        # buscándolo por nombre sí salía (bien detectado por Nico: "si
+        # los busco si aparecen, en la grilla no"). pc_store_search no
+        # filtra por descuento, así que ahora la grilla principal se
+        # comporta igual que la búsqueda para esto.
+        pc = pc_store_exact_matches(c["name"], limit=10)
+        return c, sp, deku, pc
 
     matched = []
     not_on_switch = []
     pc_results = []
 
     with ThreadPoolExecutor(max_workers=10) as pool:
-        for i, (c, sp, deku) in enumerate(pool.map(enrich, page_candidates)):
+        for i, (c, sp, deku, pc) in enumerate(pool.map(enrich, page_candidates)):
             steam_result = {
                 "appid": c["steam_appid"],
                 "name": c["name"],
@@ -1449,10 +1602,8 @@ def route_home():
             else:
                 not_on_switch.append(steam_result)
 
-            if "epic" in c:
-                pc_results.append({**c["epic"], "name": c["name"]})
-            if "gog" in c:
-                pc_results.append({**c["gog"], "name": c["name"]})
+            for p in pc:
+                pc_results.append({**p, "name": c["name"]})
 
     return jsonify(
         {
