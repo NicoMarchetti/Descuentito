@@ -74,6 +74,13 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; PriceCompareBot/1.0)"}
 _CACHE = {}
 CACHE_TTL_SECONDS = 300  # 5 minutos
 
+# Cada cuánto se reconstruye el pool completo de la home (home_candidates,
+# el barrido a CheapShark) en segundo plano -- ver scheduled_cached. 1
+# hora por default; las ofertas de las tiendas no cambian tan seguido
+# como para necesitar menos, y es fácil subirlo todavía más (4 horas, una
+# vez al día) si con esto alcanza para quedarse tranquilo con CheapShark.
+HOME_CANDIDATES_REFRESH_SECONDS = 60 * 60
+
 # Un lock por cada key de cache (no uno global, para no bloquear pedidos de
 # cosas distintas entre sí), para evitar un "cache stampede": sin esto, si
 # dos pedidos llegan casi juntos con la cache todavía fría (recién prendió
@@ -115,6 +122,45 @@ def cached(key, fetch_fn, ttl=None):
         data = fetch_fn()
         _CACHE[key] = (time.time(), data)
         return data
+
+
+# Versión "el server lo calcula solo" de cached(): con cached(), un pedido
+# ENTRANTE es lo que dispara el recálculo apenas vence el TTL -- así que la
+# frecuencia con la que se le pega a una fuente externa depende de cuánto
+# tráfico tenga el sitio, no de un intervalo fijo que uno elige. Con 3+
+# visitas repartidas en una ventana corta, eso alcanza para varios
+# recálculos (cada uno con sus propios pedidos salientes) sin que nadie
+# "lo esté pidiendo mucho" -- justo lo que terminó bloqueando a Nico de
+# CheapShark. scheduled_cached en cambio SIEMPRE devuelve lo último ya
+# calculado (nunca bloquea ni recalcula en el camino de un pedido
+# entrante) y dispara el PRÓXIMO cálculo en un hilo de fondo, aparte, apenas
+# corresponde según el intervalo -- la cantidad de pedidos salientes queda
+# fija de antemano, pase lo que pase con el tráfico del sitio. Mismo
+# mecanismo que ya usa steam_global_top_sellers_deals, generalizado para
+# reusar en cualquier otra fuente "cara" (ver home_candidates).
+_SCHEDULED = {}
+_SCHEDULED_GUARD = threading.Lock()
+
+
+def scheduled_cached(key, fetch_fn, interval_seconds):
+    entry = _SCHEDULED.setdefault(key, {"data": None, "ts": 0.0, "refreshing": False})
+    stale = time.time() - entry["ts"] > interval_seconds
+    if stale and not entry["refreshing"]:
+        with _SCHEDULED_GUARD:
+            if not entry["refreshing"]:
+                entry["refreshing"] = True
+
+                def _run():
+                    try:
+                        entry["data"] = fetch_fn()
+                        entry["ts"] = time.time()
+                    finally:
+                        entry["refreshing"] = False
+
+                threading.Thread(target=_run, daemon=True).start()
+    # None antes de que el primer cálculo en segundo plano termine (recién
+    # arrancó el server): quien llama decide qué devolver en ese caso.
+    return entry["data"]
 
 
 # ---------------------------------------------------------------------------
@@ -622,28 +668,36 @@ def cheapshark_browse_deals(store_name, limit=240):
 
     pages_needed = -(-limit // CHEAPSHARK_PAGE_SIZE)  # redondeo para arriba
 
+    CHEAPSHARK_PAGE_TTL = 30 * 60  # 30 minutos, no los 5 de siempre -- ver abajo
+
     def cached_page(page_number):
         return cached(
             f"cheapshark_browse:{store_name}:{page_number}",
             lambda: fetch_page(page_number),
+            ttl=CHEAPSHARK_PAGE_TTL,
         )
 
-    # Las páginas se piden todas en paralelo (son independientes entre sí)
-    # en vez de una por una -- con 4+ páginas por tienda, pedirlas en
-    # serie sumaba varios segundos a la primera carga (la que no tiene
-    # nada en cache todavía). pool.map devuelve los resultados en el
-    # mismo orden que se pidieron, así que arriba abajo sigue siendo el
-    # orden real de páginas aunque las respuestas lleguen desordenadas.
-    with ThreadPoolExecutor(max_workers=min(pages_needed, 10)) as pool:
-        pages = list(pool.map(cached_page, range(pages_needed)))
-
+    # Antes esto pedía TODAS las páginas en paralelo (ThreadPoolExecutor,
+    # hasta 10 a la vez) -- con 3 tiendas (Epic, GOG, Steam) x hasta 4
+    # páginas cada una, cada vez que vencía la cache de home_candidates
+    # (cada 5 minutos) se disparaba una ráfaga de varios pedidos
+    # simultáneos a CheapShark. Eso bastó para que te bloqueara la IP,
+    # siendo prácticamente vos el único usuario -- mismo tipo de problema
+    # que ya había pasado con Steam/Akamai, esta vez con CheapShark.
+    # Ahora: SECUENCIAL (una página por vez) con una pausa corta entre
+    # pedidos, Y cada página se cachea 30 minutos en vez de 5 -- el
+    # barrido completo de una tienda se repite muchas menos veces por
+    # hora, y cuando se repite, nunca le pega a CheapShark en ráfaga.
     all_deals = []
-    for page_deals in pages:
+    for page_number in range(pages_needed):
+        page_deals = cached_page(page_number)
         if not page_deals:
             break  # CheapShark ya no tenía más páginas para esta tienda
         all_deals.extend(page_deals)
         if len(page_deals) < CHEAPSHARK_PAGE_SIZE:
             break  # página incompleta: era la última
+        if page_number < pages_needed - 1:
+            time.sleep(random.uniform(0.4, 1.0))
 
     return all_deals[:limit]
 
@@ -1399,7 +1453,48 @@ def home_candidates(sort="descuento", only_discounted=False):
 
         return with_appid
 
-    return cached(f"home_candidates:{sort}:{int(only_discounted)}", fetch)
+    # scheduled_cached, NO cached() -- esto es lo que arma el barrido
+    # completo a CheapShark (Epic+GOG+Steam, ver arriba), la parte cara.
+    # Con cached() (TTL normal), CUALQUIER visita después de que venciera
+    # el TTL disparaba el recálculo -- con tráfico normal del sitio (o
+    # con Nico mismo yendo y viniendo mientras prueba cosas) alcanzaba
+    # para varios recálculos por hora, cada uno con su propia tanda de
+    # pedidos a CheapShark. Con scheduled_cached, el recálculo pasa SOLO
+    # cada HOME_CANDIDATES_REFRESH_SECONDS, en un hilo de fondo, pase lo
+    # que pase con el tráfico -- diez visitas o cero en el medio dan
+    # exactamente la misma cantidad de pedidos salientes. Las ofertas no
+    # cambian minuto a minuto, así que esto no le hace perder nada de
+    # "frescura" real a la home.
+    candidates = scheduled_cached(
+        f"home_candidates:{sort}:{int(only_discounted)}",
+        fetch,
+        interval_seconds=HOME_CANDIDATES_REFRESH_SECONDS,
+    )
+    # None solo puede pasar en el primerísimo pedido tras un restart del
+    # server, mientras el primer cálculo en segundo plano todavía no
+    # terminó -- unos pocos segundos. _warm_home_candidates_cache (ver
+    # más abajo) dispara ese primer cálculo apenas arranca el proceso,
+    # en vez de esperar a que llegue el primer visitante, así esa
+    # ventana es lo más chica posible.
+    return candidates if candidates is not None else []
+
+
+def _warm_home_candidates_cache():
+    """
+    Dispara, apenas arranca el proceso, el primer cálculo en segundo
+    plano de los DOS pools que realmente usa el frontend (el principal,
+    sort=relevancia, y el de "Destacados", sort=mas_vendidas con
+    only_discounted) -- así la primera visita real después de un
+    restart no se encuentra con una home vacía durante los varios
+    segundos que tarda el primer barrido a CheapShark/Steam. Sin esto,
+    scheduled_cached funciona igual, pero recién arranca a calcular
+    cuando llega el primer pedido que lo necesita.
+    """
+    home_candidates("relevancia", only_discounted=False)
+    home_candidates("mas_vendidas", only_discounted=True)
+
+
+_warm_home_candidates_cache()
 
 
 def _candidate_best_discount(c):
