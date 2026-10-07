@@ -68,7 +68,7 @@ export interface NintendoDirectResult {
 // calculados sobre el pool completo (antes de paginar) con el resto de
 // los filtros activos aplicados. Ver home_facets en app.py.
 export interface HomeFacets {
-  stores: { steam?: number; epic?: number; gog?: number };
+  stores: { steam?: number; epic?: number; gog?: number; xbox?: number };
   discount: { "50"?: number; "70"?: number; "90"?: number };
 }
 

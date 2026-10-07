@@ -3,13 +3,14 @@ import epicIcon from "../assets/stores/epic.png";
 import gogIcon from "../assets/stores/gog.png";
 import steamIcon from "../assets/stores/steam.png";
 import switchIcon from "../assets/stores/switch.png";
+import xboxIcon from "../assets/stores/xbox.png";
 
 export type WatchTarget =
   | { kind: "steam"; appid: number; name: string; image?: string }
   | { kind: "nintendo"; slug: string; name: string; image?: string }
-  | { kind: "pc"; store: "epic" | "gog"; gameId: string; name: string; image?: string };
+  | { kind: "pc"; store: "epic" | "gog" | "xbox"; gameId: string; name: string; image?: string };
 
-export type StoreKey = "steam" | "switch" | "epic" | "gog";
+export type StoreKey = "steam" | "switch" | "epic" | "gog" | "xbox";
 
 // Colores pedidos por tienda, más su ícono (en vez del nombre escrito).
 // GOG es un lila claro, así que usa texto/ícono con fondo claro para que
@@ -22,6 +23,7 @@ export const STORE_META: Record<
   switch: { label: "Switch", bg: "#cc000eff", fg: "#ffffff", icon: switchIcon },
   epic: { label: "Epic Games", bg: "#000000", fg: "#ffffff", icon: epicIcon },
   gog: { label: "GOG", bg: "#983ffdff", fg: "#1A1A1A", icon: gogIcon },
+  xbox: { label: "Xbox", bg: "#107C10", fg: "#ffffff", icon: xboxIcon },
 };
 
 export function watchKey(t: WatchTarget): string {

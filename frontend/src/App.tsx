@@ -59,7 +59,7 @@ export default function App() {
   // CompareTable.switchOnly más abajo): no dispara ningún pedido nuevo
   // al backend, y a medida que el scroll infinito trae más páginas, más
   // juegos entran a filtrar.
-  type SidebarStore = "steam" | "epic" | "gog" | "switch";
+  type SidebarStore = "steam" | "epic" | "gog" | "xbox" | "switch";
   const [selectedStores, setSelectedStores] = useState<Set<SidebarStore>>(new Set());
   const [minDiscount, setMinDiscount] = useState(0);
   const [priceMinStr, setPriceMinStr] = useState("");
@@ -98,9 +98,13 @@ export default function App() {
   // comentario arriba de selectedStores). Se saca acá antes de armar
   // "filters" (lo que sí viaja a /api/home), así que tocar el checkbox
   // de Switch no dispara ningún pedido nuevo: solo cambia qué tarjetas
-  // ya cargadas se muestran (ver switchOnly más abajo).
+  // ya cargadas se muestran (ver switchOnly más abajo). "xbox" SÍ se manda
+  // al backend -- a diferencia de Switch, los datos de Xbox se traen
+  // enteros una vez al día (ver xbox_deals en app.py) y ya quedan
+  // mergeados en cada candidato del pool completo, así que filtrar por
+  // Xbox antes de paginar es tan barato como filtrar por steam/epic/gog.
   const backendStores = Array.from(selectedStores).filter(
-    (s): s is "steam" | "epic" | "gog" => s !== "switch",
+    (s): s is "steam" | "epic" | "gog" | "xbox" => s !== "switch",
   );
   const switchOnly = selectedStores.has("switch");
 

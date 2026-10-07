@@ -19,9 +19,12 @@ pública gratuita sin key que agrega ~35 tiendas de PC. OJO: a diferencia
 de Steam y Nintendo, estas tiendas NO tienen precio en pesos argentinos
 en CheapShark — el precio viene en USD.
 
-Xbox queda afuera por ahora: como Nintendo, no tiene API pública, así
-que agregarlo requeriría el mismo tipo de trabajo manual/frágil que
-hicimos para Nintendo.
+Xbox/Microsoft Store sale de emerald.xboxservices.com, el mismo backend
+que usa xbox.com para su sección "Ofertas en juegos" -- no es una API
+pública documentada, así que entra "solo como fila extra" (igual que
+Switch): no tiene buscador por nombre, solo un listado paginado de
+ofertas que se trae entero una vez al día (ver xbox_deals) y se cruza
+por nombre exacto contra lo que ya se encontró en Steam/Epic/GOG.
 
 Endpoints:
   GET  /api/steam/search?q=<texto>
@@ -43,7 +46,9 @@ Correr:
   (levanta en http://localhost:5000)
 """
 
+import base64
 import json
+import os
 import random
 import re
 import threading
@@ -603,6 +608,358 @@ def pc_store_exact_matches(name, limit=10):
     ]
 
 
+# ---------------------------------------------------------------------------
+# Xbox / Microsoft Store
+# ---------------------------------------------------------------------------
+#
+# La sección "Ofertas en juegos" de xbox.com (canal DynamicChannel.GameDeals)
+# es un listado CURADO Y PAGINADO de lo que está en oferta ahora mismo, no
+# un buscador: cada pedido trae ~25 juegos más un cursor opaco (EncodedCT,
+# un JSON en base64 con "HasMore"/"SkipCount"/"TotalCount") que hay que
+# volver a mandar para pedir la página siguiente. Por eso un juego
+# "aparecía por casualidad" al buscarlo en esa página de Microsoft: si no
+# estaba en la primera tanda (~25 de ~750 en total), no había forma de
+# encontrarlo sin pedir el resto de las páginas (confirmado con Nico
+# capturando el pedido real de "cargar más" en DevTools). Acá se pagina
+# la lista COMPLETA una vez al día (mismo patrón que Steam/CheapShark:
+# secuencial, con pausas, cacheado con scheduled_cached), así que cualquier
+# juego en oferta en Xbox termina disponible para cruzar contra
+# Steam/Epic/GOG sin depender de en qué posición lo haya puesto Microsoft
+# esa semana.
+#
+# IMPORTANTE (acordado con Nico): a diferencia de Epic/GOG (CheapShark SÍ
+# tiene buscador por título), acá no hay forma de buscar un juego puntual
+# -- solo este listado de ofertas. Así que Xbox entra "solo como fila
+# extra" (igual que Switch): nunca agrega un candidato nuevo al pool,
+# solo se le pega como tienda extra a un candidato que YA existe por otra
+# fuente (normalmente Steam), cuando el nombre coincide EXACTO (mismo
+# criterio que pc_store_exact_matches, ver xbox_exact_matches más abajo).
+XBOX_BROWSE_URL = "https://emerald.xboxservices.com/xboxcomfd/browse"
+# es-AR, no es-CL (lo que traía la captura original de Nico) -- para que
+# listPrice/msrp vengan en ARS, como el resto del sitio. El primer intento
+# con es-AR tiraba 400 Bad Request, pero NO era por el mercado: el cuerpo
+# real de esa respuesta (confirmado por Nico pegándole directo a la URL)
+# es {"MissingHeader":["Header MS-CV is missing"]} -- el mismo 400 le
+# pasa aunque pida es-CL sin ese header. "MS-CV" es un correlation vector
+# (trazabilidad interna de Microsoft): hace falta que ESTÉ, con el
+# formato correcto, pero no que coincida con ningún valor en particular
+# -- se genera uno nuevo por pedido (ver _xbox_ms_cv más abajo), como
+# hace el navegador.
+XBOX_LOCALE = "es-AR"
+XBOX_CHANNEL_ID = "DynamicChannel.GameDeals"
+XBOX_CHANNEL_KEY = "BROWSE_CHANNELID=DYNAMICCHANNEL.GAMEDEALS_FILTERS="
+XBOX_DEALS_TTL = 24 * 60 * 60  # 1 vez por día, mismo criterio que Steam/CheapShark
+XBOX_MAX_PAGES = 40  # ~750 juegos / ~25 por página -- de sobra, con margen de ser humano se queda corto antes
+
+XBOX_HEADERS = {
+    "accept": "*/*",
+    "accept-language": "es-AR,es;q=0.9,en;q=0.7",
+    "content-type": "application/json",
+    "origin": "https://www.xbox.com",
+    "referer": "https://www.xbox.com/",
+    "x-ms-api-version": "1.1",
+    "user-agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    ),
+}
+
+
+def _xbox_ms_cv():
+    """
+    Genera un correlation vector válido para el header MS-CV -- formato
+    real de Microsoft: una raíz de 16 bytes en base64 (sin "="), seguida
+    de ".0" (el contador de la cadena de pedidos, arranca en 0). El
+    servidor exige que el header ESTÉ y tenga esta forma, no que valga
+    algo en particular -- cada pedido genera el suyo, como hace el propio
+    xbox.com en el navegador.
+    """
+    root = base64.b64encode(os.urandom(16)).decode("ascii").rstrip("=")
+    return f"{root}.0"
+
+
+def _xbox_fetch_page(encoded_ct=None):
+    body = {
+        "Filters": "e30=",  # base64("{}") -- sin filtros extra, mismo valor que manda la propia página
+        "ReturnFilters": False,
+        "ChannelKeyToBeUsedInResponse": XBOX_CHANNEL_KEY,
+        "ChannelId": XBOX_CHANNEL_ID,
+    }
+    if encoded_ct:
+        body["EncodedCT"] = encoded_ct
+    headers = {**XBOX_HEADERS, "ms-cv": _xbox_ms_cv()}
+    r = requests.post(
+        XBOX_BROWSE_URL,
+        params={"locale": XBOX_LOCALE},
+        json=body,
+        headers=headers,
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+# Último error real del barrido de Xbox -- para poder VER por qué
+# xbox_deals() está dando 0 (¿pedido rechazado? ¿canal vacío para
+# es-AR? ¿JSON distinto al esperado?) en vez de tener que adivinar
+# desde acá, donde no se puede probar el pedido real (la red de este
+# sandbox tiene bloqueada la salida a xboxservices.com). Ver
+# /api/debug/xbox-deals.
+_xbox_last_error = {"page": None, "error": None, "status_code": None}
+# Cuántos de los xbox_deals() terminaron pegados a un candidato real en el
+# ÚLTIMO fetch() de home_candidates (ver el cruce normalizado más abajo) --
+# para distinguir "scrapeo mal" (count bajo en /api/debug/xbox-deals) de
+# "scrapeo bien pero no cruza con nada" (count alto acá, matched bajo).
+_xbox_last_matched = {"matched": None, "total": None, "ts": None}
+
+
+def _fetch_all_xbox_deals():
+    """
+    fetch_fn de xbox_deals() (ver scheduled_cached): pagina TODO el canal
+    "Ofertas en juegos" de Microsoft Store, de a ~25 por pedido, siguiendo
+    el cursor EncodedCT hasta que la propia respuesta deja de traer
+    productos nuevos o hasta XBOX_MAX_PAGES (lo que pase primero) --
+    siempre secuencial, con pausa entre pedidos, nunca en paralelo, mismo
+    criterio que el resto de los barridos "una vez por día" de esta app.
+    """
+    global _xbox_last_error
+    _xbox_last_error = {"page": None, "error": None, "status_code": None}
+    results = []
+    seen_ids = set()
+    encoded_ct = None
+    for page_num in range(XBOX_MAX_PAGES):
+        try:
+            data = _xbox_fetch_page(encoded_ct)
+        except requests.RequestException as e:
+            resp = getattr(e, "response", None)
+            _xbox_last_error = {
+                "page": page_num,
+                "error": str(e),
+                "status_code": getattr(resp, "status_code", None),
+                # El cuerpo de la respuesta (si la hubo) -- fue justo acá
+                # donde se encontró el header MS-CV faltante, que
+                # raise_for_status() por sí solo no mostraba.
+                "response_body": (resp.text[:500] if resp is not None else None),
+            }
+            break
+        except ValueError as e:
+            _xbox_last_error = {"page": page_num, "error": f"JSON inválido: {e}", "status_code": None}
+            break
+
+        channel = (data.get("channels") or {}).get(XBOX_CHANNEL_KEY)
+        if not channel:
+            _xbox_last_error = {
+                "page": page_num,
+                "error": f"Sin canal '{XBOX_CHANNEL_KEY}' en la respuesta -- claves recibidas: {list((data.get('channels') or {}).keys())}",
+                "status_code": None,
+            }
+            break
+
+        products = channel.get("products") or []
+        summaries = {
+            s["productId"]: s
+            for s in data.get("productSummaries", [])
+            if s.get("productId")
+        }
+
+        new_this_page = 0
+        for ref in products:
+            pid = ref.get("productId")
+            if not pid or pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            new_this_page += 1
+
+            s = summaries.get(pid)
+            if not s:
+                continue
+            prices = (s.get("specificPrices") or {}).get("purchaseable") or []
+            if not prices:
+                continue
+            p = prices[0]
+            discount = round(p.get("discountPercentage") or 0)
+            if discount <= 0:
+                continue
+
+            images = s.get("images") or {}
+            thumb = (images.get("boxArt") or images.get("poster") or {}).get("url")
+
+            results.append(
+                {
+                    "store": "Xbox",
+                    "name": (s.get("title") or "").strip(),
+                    "currency": p.get("currency", "ARS"),
+                    "initial_price": p.get("msrp"),
+                    "final_price": p.get("listPrice"),
+                    "discount_percent": discount,
+                    "deal_url": f"https://www.xbox.com/es-ar/games/store/x/{pid}",
+                    "thumb": thumb,
+                    "game_id": pid,
+                }
+            )
+
+        # Sin productos nuevos o sin cursor para la próxima -> se acabó la lista.
+        encoded_ct = channel.get("encodedCT")
+        if not encoded_ct or new_this_page == 0:
+            break
+        if page_num < XBOX_MAX_PAGES - 1:
+            time.sleep(random.uniform(1.0, 2.0))
+
+    return results
+
+
+def xbox_deals():
+    deals = scheduled_cached(
+        "xbox_deals", _fetch_all_xbox_deals, interval_seconds=XBOX_DEALS_TTL
+    )
+    return deals if deals is not None else []
+
+
+# Microsoft nombra sus fichas distinto a Steam para el MISMO juego --
+# "Forza Horizon 6 Standard Edition" (Xbox) vs "Forza Horizon 6" (Steam),
+# "The Witcher 3: Wild Hunt — Remastered" (Xbox) vs "The Witcher 3: Wild
+# Hunt" (Steam), etc. Con el cruce por nombre EXACTO de antes, esto nunca
+# pegaba -- confirmado con datos reales (xbox_deals() trayendo 663 juegos
+# genuinos, pero 0 terminando pegados en la grilla). Acá se recorta el
+# sufijo de "edición" MÁS COMÚN (y los símbolos de marca registrada) antes
+# de comparar -- a diferencia de pc_store_exact_matches (que evita
+# coincidencias de DLCs recortando NADA, solo comparando exacto), acá no
+# hay DLCs sueltos en el canal de ofertas de Xbox -- son fichas de
+# juegos completos, así que normalizar la edición es seguro.
+_XBOX_TRADEMARK_RE = re.compile(r"[®™©]")
+_XBOX_EDITION_SUFFIX_RE = re.compile(
+    r"\s*[:\-–—]?\s*"
+    r"(standard|deluxe|definitive|complete|ultimate|gold|anniversary|enhanced|digital|"
+    r"game of the year|goty|remastered|remaster)"
+    r"\s*(edition)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _xbox_strip_trademark(name):
+    # Como espacio, no como "": "Watch Dogs®2" sin esto queda "watch
+    # dogs2" (no calza con el "Watch Dogs 2" de Steam); con espacio
+    # queda "watch dogs 2" y el \s+ de abajo limpia los dobles espacios
+    # para los casos donde el símbolo SÍ tenía espacio alrededor.
+    return _XBOX_TRADEMARK_RE.sub(" ", name)
+
+
+def _xbox_name_key(name):
+    """Clave base (sin tocar ediciones) -- mismo criterio que el resto de la app: strip().lower()."""
+    base = _xbox_strip_trademark(name).strip()
+    base = re.sub(r"\s+", " ", base)
+    return base.lower()
+
+
+def _xbox_name_variants(name):
+    """
+    Devuelve el/los nombres normalizados a probar contra las claves de
+    candidates (name.strip().lower()) -- el nombre tal cual (sin
+    trademark) y, si tenía un sufijo de edición reconocible, también sin
+    ese sufijo. Puede devolver el mismo valor una sola vez si no había
+    sufijo que sacar.
+    """
+    base_key = _xbox_name_key(name)
+    variants = {base_key}
+    stripped = _XBOX_EDITION_SUFFIX_RE.sub("", _xbox_strip_trademark(name).strip())
+    stripped = re.sub(r"\s+", " ", stripped).strip().lower()
+    if stripped:
+        variants.add(stripped)
+    return variants
+
+
+_xbox_variant_index_cache = {"ts": None, "index": {}}
+
+
+def _xbox_variant_index():
+    """
+    Índice variante-normalizada -> [deals de Xbox con esa variante],
+    reconstruido SOLO cuando xbox_deals() realmente cambió (su "ts" en
+    _SCHEDULED se actualiza una vez por día) -- en vez de recalcular
+    _xbox_name_variants() para los ~660 juegos de Xbox en CADA pedido.
+
+    Esto es lo que hacía que "las búsquedas estén muy lentas" (reportado
+    por Nico): xbox_exact_matches recorría xbox_deals() entero (663
+    juegos, con dos regex cada uno) por CADA resultado de Steam de CADA
+    búsqueda -- con 14 resultados como "the witcher", eso es ~9000
+    cálculos de variantes repetidos en cada pedido a /api/compare, todos
+    sobre el MISMO listado de 663 que no cambió. Con el índice, cada
+    búsqueda hace lookups de diccionario (O(1)) en vez de recorrer todo.
+    """
+    entry = _SCHEDULED.get("xbox_deals")
+    ts = entry["ts"] if entry else None
+    if _xbox_variant_index_cache["ts"] != ts:
+        index = {}
+        for d in xbox_deals():
+            for variant in _xbox_name_variants(d["name"]):
+                index.setdefault(variant, []).append(d)
+        _xbox_variant_index_cache["ts"] = ts
+        _xbox_variant_index_cache["index"] = index
+    return _xbox_variant_index_cache["index"]
+
+
+def xbox_exact_matches(name):
+    """Mismo criterio normalizado que el merge de home_candidates, para /api/compare (búsqueda manual)."""
+    index = _xbox_variant_index()
+    seen_ids = set()
+    results = []
+    for variant in _xbox_name_variants(name):
+        for d in index.get(variant, ()):
+            if d["game_id"] not in seen_ids:
+                seen_ids.add(d["game_id"])
+                results.append(d)
+    return results
+
+
+def _merge_xbox_into(candidates_list):
+    """
+    Pega la fila extra de Xbox sobre el pool de candidatos YA RESUELTO
+    (steam/epic/gog, después de pasar por sort/filtro) -- a propósito
+    FUERA de home_candidates/fetch() y de su caché de 1 hora
+    (scheduled_cached), para no quedar pegado al snapshot de Xbox que
+    había en el momento exacto de ESE cálculo.
+
+    Por qué hace falta esto (confirmado con datos reales, no adivinado):
+    con el cruce adentro de fetch(), la primera vez que el proceso
+    arranca, home_candidates y xbox_deals disparan sus primeros cálculos
+    en paralelo (_warm_home_candidates_cache) -- xbox_deals tarda 1-2 min
+    en paginar las ~30 páginas del catálogo completo, bastante más que
+    home_candidates. Si el fetch() de home termina primero, agarra
+    xbox_deals() todavía vacío (recién arrancó, scheduled_cached devuelve
+    None -> [] mientras no haya un primer cálculo), y ESE resultado
+    completo (con cero cruces) queda cacheado un hora entera -- no hay
+    forma de que se autocorrija sola, ni reiniciando (reiniciar reinicia
+    TAMBIÉN xbox_deals, repitiendo la misma carrera). Nico lo confirmó
+    así: /api/debug/xbox-deals mostraba count 663 pero
+    matched_pool_total_xbox en 0, muchos minutos después.
+
+    Al mergearse ACÁ (cada pedido a home_candidates, no solo 1 vez por
+    hora) contra la versión MÁS RECIENTE de xbox_deals(), esto se
+    autocorrige solo apenas termina el primer barrido de Xbox, sin
+    esperar el próximo refresco de home_candidates ni pedir un
+    force-refresh manual. El costo es bajo: son operaciones en memoria
+    (sin red) sobre un pool ya filtrado/paginado, no sobre los miles de
+    candidatos crudos. Además, como los candidatos son los MISMOS objetos
+    mientras no venza el caché de 1 hora, un candidato que ya tiene
+    "xbox" pegado se salta (no recalcula nada de nuevo para él).
+    """
+    index = _xbox_variant_index()
+    matched_now = 0
+    for c in candidates_list:
+        if "xbox" in c:
+            continue
+        for variant in _xbox_name_variants(c["name"]):
+            hits = index.get(variant)
+            if hits:
+                c["xbox"] = hits[0]
+                matched_now += 1
+                break
+    _xbox_last_matched["matched"] = sum(1 for c in candidates_list if "xbox" in c)
+    _xbox_last_matched["total"] = len(xbox_deals())
+    _xbox_last_matched["ts"] = time.time()
+    return matched_now
+
+
 CHEAPSHARK_PAGE_SIZE = 60  # tope real de la API de CheapShark -- pedir más por página no funciona, hay que paginar.
 
 
@@ -700,6 +1057,77 @@ def cheapshark_browse_deals(store_name, limit=240):
             time.sleep(random.uniform(0.4, 1.0))
 
     return all_deals[:limit]
+
+
+EPIC_GOG_STEAM_PRICE_TTL = 6 * 60 * 60  # 4 veces por día -- si un juego falló (ej. Steam bloqueando en ese momento), se reintenta en unas horas, no al otro día
+# Techo de seguridad, NO un tope activo -- con los ~480 nombres únicos
+# que puede traer Epic+GOG (240+240), nunca debería llegar a tocarlo. Un
+# EPIC_GOG_STEAM_PRICE_MAX bajo (200, la versión anterior de esto) cortaba
+# la lista SIEMPRE en el mismo punto -- como el orden es estable, los
+# mismos ~280 quedaban afuera para SIEMPRE, no "más tarde": nunca se
+# llegaba a intentarlos (bug real, reportado por Nico). Esto corre en su
+# propio hilo de fondo, sin bloquear nada, así que no hace falta cortar
+# la lista -- tarda más (varios minutos en vez de uno), pero una vez
+# cada 6 horas eso no le importa a nadie.
+EPIC_GOG_STEAM_PRICE_MAX = 1000
+
+
+def _fetch_epic_gog_steam_prices():
+    """
+    fetch_fn de epic_gog_steam_prices(): resuelve el precio de Steam para
+    los juegos que llegan al pool de home_candidates SOLO por Epic/GOG
+    (CheapShark expone su steamAppID, pero no su precio de Steam en sí).
+
+    Job PROPIO y separado (no una resolución adentro de home_candidates) a
+    propósito: el pool de Epic+GOG puede tener varios cientos de nombres
+    únicos, y resolverlos uno por uno DENTRO del fetch() de
+    home_candidates (que corre cada hora) significaba que ese fetch()
+    completo tardaba varios minutos en terminar CADA VEZ -- mientras
+    tanto, home_candidates() seguía devolviendo None (nada calculado
+    todavía) y la home se veía con "0 ofertas encontradas" a pesar de que
+    el log del server mostraba pedidos 200 OK normales (eran reales, solo
+    que home_candidates nunca llegaba a terminar). Acá en cambio se
+    cachea aparte, SIN cortar la lista (ver EPIC_GOG_STEAM_PRICE_MAX) --
+    tarda lo que tenga que tardar, pero corre solo, en segundo plano.
+
+    Totalmente SECUENCIAL, nunca en paralelo (la primera versión de esto
+    hacía tandas de a 4 en paralelo -- con gunicorn corriendo varios
+    workers, cada uno dispara su propia copia de este job por separado,
+    así que "4 en paralelo" se multiplicaba por la cantidad de workers al
+    mismo tiempo: exactamente lo que volvió a bloquear la IP de Nico en
+    Steam. Mismo criterio que steam_global_top_sellers_deals y
+    xbox_deals: uno por uno, con pausa entre cada pedido, pase lo que
+    pase con la cantidad de workers). home_candidates() solo hace una
+    lectura en memoria de lo que este job ya dejó resuelto, sin red.
+    """
+    appids = []
+    seen = set()
+    for store in ("Epic Games Store", "GOG"):
+        for d in cheapshark_browse_deals(store, limit=240):
+            appid = d.get("steam_appid")
+            if appid and appid not in seen:
+                seen.add(appid)
+                appids.append(appid)
+    appids = appids[:EPIC_GOG_STEAM_PRICE_MAX]
+
+    prices = {}
+    for i, appid in enumerate(appids):
+        price = steam_price(appid)
+        if price.get("available"):
+            prices[appid] = price
+        if i < len(appids) - 1:
+            time.sleep(random.uniform(0.5, 1.0))
+
+    return prices
+
+
+def epic_gog_steam_prices():
+    prices = scheduled_cached(
+        "epic_gog_steam_prices",
+        _fetch_epic_gog_steam_prices,
+        interval_seconds=EPIC_GOG_STEAM_PRICE_TTL,
+    )
+    return prices if prices is not None else {}
 
 
 def cheapshark_game_lookup(game_id):
@@ -1086,6 +1514,131 @@ def route_debug_steam_chart():
     )
 
 
+@app.get("/api/debug/xbox-deals")
+def route_debug_xbox_deals():
+    """
+    Mismo propósito que /api/debug/steam-chart pero para Xbox: permite
+    chequear desde afuera (sin leer logs del server) si el barrido
+    paginado a emerald.xboxservices.com está funcionando, cuántos juegos
+    trajo en total y hace cuánto fue el último refresco -- sin esto, un
+    0 en "count" podría ser "todavía no corrió" o "se rompió el scraping"
+    y no habría forma de distinguirlos desde afuera.
+    """
+    entry = _SCHEDULED.get("xbox_deals", {"data": None, "ts": 0.0, "refreshing": False})
+    deals = entry["data"] or []
+    age_sec = round(time.time() - entry["ts"]) if entry["ts"] else None
+    return jsonify(
+        {
+            "count": len(deals),
+            "sample_names": [d["name"] for d in deals[:5]],
+            "cache_age_sec": age_sec,
+            "refreshing_now": entry["refreshing"],
+            # Por qué el ÚLTIMO barrido cortó donde cortó -- null en
+            # "error" con count en 0 significa que no cortó por error (el
+            # canal vino vacío de entrada, por ejemplo); con algo acá, es
+            # la causa real (pedido rechazado, status code, JSON raro).
+            "last_error": _xbox_last_error,
+            # Cuántos de esos `count` juegos terminaron pegados a un
+            # candidato real (Steam/Epic/GOG) la ÚLTIMA vez que se llamó a
+            # home_candidates() (ver _merge_xbox_into) -- se recalcula en
+            # CADA pedido a /api/home, no solo 1 vez por hora, así que este
+            # número se actualiza solo apenas termina el primer barrido de
+            # Xbox, sin esperar ni forzar nada. "matched": null significa
+            # que todavía no se pidió /api/home en este proceso -- pedilo
+            # una vez (o esperá el warm-up) y volvé a chequear acá.
+            "matched_into_pool": _xbox_last_matched["matched"],
+            "matched_pool_total_xbox": _xbox_last_matched["total"],
+            "matched_age_sec": (
+                round(time.time() - _xbox_last_matched["ts"])
+                if _xbox_last_matched["ts"]
+                else None
+            ),
+        }
+    )
+
+
+@app.get("/api/debug/epic-gog-steam")
+def route_debug_epic_gog_steam():
+    """
+    Mismo propósito que /api/debug/xbox-deals pero para
+    epic_gog_steam_prices(): cuántos juegos de Epic/GOG se resolvieron
+    con precio de Steam, hace cuánto fue el último barrido, y si está
+    corriendo uno ahora -- para confirmar si un force-refresh realmente
+    mejoró el número, en vez de adivinar mirando la home.
+    """
+    entry = _SCHEDULED.get("epic_gog_steam_prices", {"data": None, "ts": 0.0, "refreshing": False})
+    prices = entry["data"] or {}
+    age_sec = round(time.time() - entry["ts"]) if entry["ts"] else None
+    return jsonify(
+        {
+            "resolved_count": len(prices),
+            "cache_age_sec": age_sec,
+            "refreshing_now": entry["refreshing"],
+        }
+    )
+
+
+# Nombres válidos para /api/debug/force-refresh=<job> -- cada uno
+# corresponde a una clave real de _SCHEDULED (o, para steam_global, a su
+# propio diccionario de cache aparte).
+_FORCE_REFRESH_JOBS = {
+    "home_relevancia": lambda: ("home_candidates:relevancia:0", lambda: home_candidates("relevancia", only_discounted=False)),
+    "home_destacados": lambda: ("home_candidates:mas_vendidas:1", lambda: home_candidates("mas_vendidas", only_discounted=True)),
+    "xbox": lambda: ("xbox_deals", xbox_deals),
+    "epic_gog_steam": lambda: ("epic_gog_steam_prices", epic_gog_steam_prices),
+}
+
+
+@app.get("/api/debug/force-refresh")
+def route_debug_force_refresh():
+    """
+    Fuerza que uno de los jobs de fondo (los que corren con
+    scheduled_cached, más steam_global aparte) vuelva a calcularse YA,
+    sin esperar a que venza su intervalo normal (1 hora para la home, 24
+    horas para Xbox y para la resolución de precios Epic/GOG->Steam) ni
+    reiniciar el server entero.
+
+    Por qué hace falta esto: un candidato que falló en resolver su precio
+    de Steam durante el único pase diario de epic_gog_steam_prices (por
+    ejemplo, justo mientras Steam estaba bloqueando) se queda mostrando
+    "no disponible" hasta el PRÓXIMO pase, 24hs después -- no hay
+    reintento automático más seguido (a propósito: resolver esto más
+    seguido es justo el patrón de ráfaga que ya bloqueó la IP una vez).
+    Esto da una forma manual de pedir "probá de nuevo ahora", para usar
+    cuando Nico ya sabe que el bloqueo pasó y no quiere esperar.
+
+    ?job=home_relevancia | home_destacados | xbox | epic_gog_steam | all
+    Dispara el recálculo en un hilo de fondo (como scheduled_cached
+    siempre hace) y devuelve al toque -- no espera a que termine. Mirar
+    /api/debug/xbox-deals o volver a pedir /api/home en unos segundos
+    para ver el resultado.
+    """
+    valid_names = list(_FORCE_REFRESH_JOBS.keys()) + ["steam_global"]
+    job = request.args.get("job", "all")
+    jobs = valid_names if job == "all" else [job]
+    invalid = [j for j in jobs if j not in valid_names]
+    if invalid:
+        return jsonify({"error": f"job inválido: {invalid}", "jobs_validos": valid_names + ["all"]}), 400
+
+    triggered = []
+    for j in jobs:
+        if j == "steam_global":
+            # steam_global_top_sellers_deals() no usa scheduled_cached (es
+            # un patrón más viejo, con su propio dict aparte) -- se fuerza
+            # distinto, pero entra en la misma lista.
+            _steam_global_deals_cache["ts"] = 0.0
+            steam_global_top_sellers_deals()
+        else:
+            key, call = _FORCE_REFRESH_JOBS[j]()
+            entry = _SCHEDULED.get(key)
+            if entry:
+                entry["ts"] = 0.0  # fuerza "stale" -- el call de abajo dispara el recálculo
+            call()  # scheduled_cached ve que está stale y arranca el hilo de fondo
+        triggered.append(j)
+
+    return jsonify({"triggered": triggered})
+
+
 
 @app.get("/api/nintendo/check/<int:steam_appid>")
 def route_nintendo_check(steam_appid):
@@ -1114,7 +1667,7 @@ def compare_steam_results(steam_results, with_prices=True):
         # motivo que en route_home (ver el comentario grande ahí): sin
         # filtrar, CheapShark también trae DLCs/bundles con título
         # parecido como si fueran el juego mismo.
-        pc = pc_store_exact_matches(s["name"], limit=10)
+        pc = pc_store_exact_matches(s["name"], limit=10) + xbox_exact_matches(s["name"])
         return s, sp, deku, pc
 
     matched = []
@@ -1141,7 +1694,20 @@ def route_compare():
         return jsonify({"error": "falta ?q="}), 400
 
     steam_results = steam_search(q)
-    matched, not_on_switch, _ = compare_steam_results(steam_results)
+    # BUG REAL encontrado (reportado por Nico: buscaba "black flag
+    # resynced", Steam SÍ encontraba "Assassin's Creed Black Flag
+    # Resynced", pero Xbox nunca aparecía aunque xbox_deals() lo tuviera) --
+    # compare_steam_results ya arma, por cada resultado de Steam, sus
+    # matches exactos de Epic/GOG/Xbox usando el NOMBRE REAL del juego
+    # ("Assassin's Creed Black Flag Resynced") -- pero acá se tiraba ese
+    # resultado (el "_" de abajo) y se volvía a armar pc_stores buscando
+    # contra lo que el usuario ESCRIBIÓ ("black flag resynced"), no contra
+    # el título completo. pc_store_search(q) es fuzzy (CheapShark busca
+    # por substring), así que igual encontraba algo ahí -- pero
+    # xbox_exact_matches(q) exige coincidencia EXACTA (Xbox no tiene
+    # buscador propio), y nadie escribe el título completo tal cual en el
+    # buscador, así que esa parte nunca pegaba.
+    matched, not_on_switch, pc_from_steam_names = compare_steam_results(steam_results)
 
     # Búsqueda directa en Nintendo, independiente de si el juego está en
     # Steam. Evita duplicar lo que ya salió matcheado desde Steam.
@@ -1152,12 +1718,25 @@ def route_compare():
         if d["name"].strip().lower() not in already_matched_names
     ]
 
+    # pc_store_search(q) + xbox_exact_matches(q) siguen siendo útiles
+    # ADEMÁS (cubren un juego de Epic/GOG que ni apareció en la búsqueda
+    # de Steam, o el caso borde de que alguien sí escriba el título
+    # completo) -- se combinan con lo de arriba, sin duplicar la misma
+    # oferta dos veces (puede pisarse si el nombre coincide en ambos).
+    pc_stores = pc_store_search(q) + xbox_exact_matches(q)
+    seen_pc = {(p.get("store"), p.get("game_id")) for p in pc_stores}
+    for p in pc_from_steam_names:
+        key = (p.get("store"), p.get("game_id"))
+        if key not in seen_pc:
+            seen_pc.add(key)
+            pc_stores.append(p)
+
     return jsonify(
         {
             "query": q,
             "matched": matched,
             "steam_only": not_on_switch,
-            "pc_stores": pc_store_search(q),
+            "pc_stores": pc_stores,
             "nintendo_direct": nintendo_direct,
         }
     )
@@ -1227,6 +1806,28 @@ def home_candidates(sort="descuento", only_discounted=False):
         sort = "descuento"
 
     def fetch():
+        # Pedido en PRIMER lugar, antes que cualquier otra fuente (Steam
+        # specials, Epic, GOG, Xbox) -- a pedido explícito de Nico: quiere
+        # que el ranking de más vendidos de Steam sea lo primero que se
+        # trae en cada ciclo, para que en cuanto esté disponible, el resto
+        # del pool ya se termine de armar organizado en base a él (en vez
+        # de, por ejemplo, quedar a mitad de un barrido largo de CheapShark
+        # y recién al final acordarse de pedirlo). En la práctica el
+        # resultado ya era el mismo de cualquier forma -- esto solo se usa
+        # para ORDENAR, y el ordenamiento siempre corrió sobre el pool ya
+        # completo, antes de cachear nada, así que nunca se veía a medio
+        # ordenar -- pero no cuesta nada pedirlo primero y es más claro así.
+        # steam_global_top_sellers_ranked() usa cached() (no
+        # scheduled_cached): la primera vez que se pide bloquea ESTE hilo
+        # de fondo (nunca un pedido de un visitante real) hasta traer la
+        # página; después queda 5 minutos en caché, así que pedirlo acá
+        # para TODOS los sorts (no solo "relevancia", que es el único que
+        # lo usa para ordenar) no agrega pedidos de red extra reales en la
+        # práctica -- como mucho, una vez cada 5 minutos.
+        top_sellers_rank = {
+            appid: i for i, appid in enumerate(steam_global_top_sellers_ranked())
+        }
+
         candidates = {}
 
         def upsert(name, tiny_image, steam_appid, **store_price):
@@ -1342,11 +1943,55 @@ def home_candidates(sort="descuento", only_discounted=False):
                     **extra,
                 )
 
+        # BUG REAL encontrado (reportado por Nico: "un monton de juegos
+        # que me aparecen con no disponible en steam cuando si estan
+        # disponibles", después de tener la app abierta un rato) --
+        # candidatos que llegaron SOLO por Epic/GOG (los dos loops de
+        # cheapshark_browse_deals de arriba) traen un steam_appid gracias
+        # a que CheapShark lo expone, pero NUNCA se les pegó la clave
+        # "steam" -- a esos, route_home los resolvía EN VIVO, por página,
+        # con un ThreadPoolExecutor de hasta 10 pedidos en paralelo a
+        # Steam. EXACTAMENTE el mismo patrón que ya había baneado la IP de
+        # Nico en Steam/Akamai una vez. Se arregla con
+        # epic_gog_steam_prices() (ver más abajo, es su PROPIO job --
+        # NO una resolución acá adentro: la primera versión de este fix
+        # SÍ la hizo acá, secuencial con pausas por cada candidato sin
+        # "steam", y resultó ser OTRO bug: con cientos de candidatos de
+        # Epic/GOG, esto tardaba varios minutos CADA VEZ que corría este
+        # fetch() -- "el backend me esta haciendo los pedidos [pero] la
+        # pagina no me muestra nada" era justo eso, home_candidates
+        # todavía no había terminado de calcular nada). Con un job propio
+        # y cacheado aparte, acá solo queda una lectura en memoria, sin
+        # red y sin bloquear nada.
+        resolved_prices = epic_gog_steam_prices()
+        for c in candidates.values():
+            if c["steam_appid"] and "steam" not in c:
+                price = resolved_prices.get(c["steam_appid"])
+                if price:
+                    c["steam"] = price
+
+        # Xbox NO se pega acá adentro -- ver el comentario grande junto a
+        # _merge_xbox_into, más abajo (fuera de este fetch()). Dos
+        # versiones anteriores lo intentaron acá: la primera corría antes
+        # de que el pool estuviera completo (cruzaba contra un puñado de
+        # candidatos y daba match 0 siempre), la segunda ya cruzaba contra
+        # el pool completo pero quedaba CONGELADA adentro del resultado
+        # cacheado 1 hora de scheduled_cached -- confirmado con datos
+        # reales (Nico: matched_into_pool volvió a dar 0 con
+        # matched_pool_total_xbox en 0 varios minutos después de que
+        # /api/debug/xbox-deals ya mostraba count 663) -- el fetch() que
+        # ganó la carrera de arranque había corrido ANTES de que
+        # xbox_deals() terminara su primer barrido (que tarda. ~1-2 min
+        # en paginar todo), capturó xbox_deals() vacío, y como fetch()
+        # completo (con ESE 0) queda cacheado una hora entera, no había
+        # forma de que se autocorrija sin esperar o reiniciar nunca
+        # (reiniciar reinicia TAMBIÉN xbox_deals(), repitiendo la carrera).
+
         with_appid = [c for c in candidates.values() if c["steam_appid"]]
 
         def best_discount(c):
             return max(
-                (c[k]["discount_percent"] for k in ("steam", "epic", "gog") if k in c),
+                (c[k]["discount_percent"] for k in ("steam", "epic", "gog", "xbox") if k in c),
                 default=0,
             )
 
@@ -1370,21 +2015,19 @@ def home_candidates(sort="descuento", only_discounted=False):
             # Epic/GOG ni para las ofertas que suma CheapShark (esas APIs
             # no lo exponen), así que lo único "real" con lo que se puede
             # priorizar es el ranking GLOBAL de Steam
-            # (steam_global_top_sellers_ranked(), ver más arriba -- OJO,
-            # NO es steam_top_sellers(), esa es una lista chica de la
-            # portada vieja que resultó ser un ranking distinto). Se
-            # compara por steam_appid (no por nombre: más preciso, sin
-            # depender de que el nombre venga escrito igual en las dos
-            # fuentes). Los candidatos que están en ese ranking van
-            # primero, EN ESE ORDEN; todo lo demás queda después, en el
-            # mismo orden relativo en que ya venía (sort() de Python es
-            # estable, así que los que empatan en "no está en el ranking"
-            # no se reordenan entre sí) -- sigue sin haber un criterio
-            # propio por encima para ESE resto, solo se adelanta lo que sí
-            # tiene un dato real de popularidad.
-            top_sellers_rank = {
-                appid: i for i, appid in enumerate(steam_global_top_sellers_ranked())
-            }
+            # (steam_global_top_sellers_ranked(), ya pedido al principio de
+            # este fetch() -- ver el comentario grande ahí -- OJO, NO es
+            # steam_top_sellers(), esa es una lista chica de la portada
+            # vieja que resultó ser un ranking distinto). Se compara por
+            # steam_appid (no por nombre: más preciso, sin depender de que
+            # el nombre venga escrito igual en las dos fuentes). Los
+            # candidatos que están en ese ranking van primero, EN ESE
+            # ORDEN; todo lo demás queda después, en el mismo orden
+            # relativo en que ya venía (sort() de Python es estable, así
+            # que los que empatan en "no está en el ranking" no se
+            # reordenan entre sí) -- sigue sin haber un criterio propio por
+            # encima para ESE resto, solo se adelanta lo que sí tiene un
+            # dato real de popularidad.
             not_top_seller = len(top_sellers_rank)
             with_appid.sort(
                 key=lambda c: top_sellers_rank.get(c["steam_appid"], not_top_seller)
@@ -1476,7 +2119,16 @@ def home_candidates(sort="descuento", only_discounted=False):
     # más abajo) dispara ese primer cálculo apenas arranca el proceso,
     # en vez de esperar a que llegue el primer visitante, así esa
     # ventana es lo más chica posible.
-    return candidates if candidates is not None else []
+    if candidates is None:
+        return []
+
+    # Xbox se pega ACÁ, fuera del caché de 1 hora de arriba -- ver el
+    # comentario grande en _merge_xbox_into sobre por qué (la versión
+    # anterior, adentro de fetch(), quedaba pegada al snapshot de Xbox
+    # del momento exacto del cálculo, que en el primer arranque del
+    # proceso casi siempre está vacío).
+    _merge_xbox_into(candidates)
+    return candidates
 
 
 def _warm_home_candidates_cache():
@@ -1492,6 +2144,13 @@ def _warm_home_candidates_cache():
     """
     home_candidates("relevancia", only_discounted=False)
     home_candidates("mas_vendidas", only_discounted=True)
+    # Dispara también el primer barrido de Xbox y de precios de Steam para
+    # Epic/GOG apenas arranca el proceso, en vez de esperar a que
+    # home_candidates los pida de rebote -- mismo motivo que los dos
+    # calls de arriba. Son jobs propios (scheduled_cached), así que esto
+    # solo DISPARA sus hilos de fondo, no bloquea nada acá.
+    xbox_deals()
+    epic_gog_steam_prices()
 
 
 _warm_home_candidates_cache()
@@ -1499,7 +2158,7 @@ _warm_home_candidates_cache()
 
 def _candidate_best_discount(c):
     return max(
-        (c[k]["discount_percent"] for k in ("steam", "epic", "gog") if k in c),
+        (c[k]["discount_percent"] for k in ("steam", "epic", "gog", "xbox") if k in c),
         default=0,
     )
 
@@ -1533,7 +2192,7 @@ def _candidate_price_ars(c, rate):
             return price["final_price"] * rate
         return None
 
-    for k in ("steam", "epic", "gog"):
+    for k in ("steam", "epic", "gog", "xbox"):
         if k in c:
             value = in_ars(c[k])
             if value is not None:
@@ -1544,17 +2203,20 @@ def _candidate_price_ars(c, rate):
 def _filter_candidates(candidates, stores=None, min_discount=0, price_min=None, price_max=None, rate=None):
     """
     Filtra el pool de candidatos por el sidebar de filtros. "stores" solo
-    puede ser un subconjunto de {"steam","epic","gog"} -- Switch queda
-    afuera a propósito: recién se sabe si un candidato está en la eShop
-    DESPUÉS de consultarlo uno por uno contra DekuDeals (ver enrich() en
-    route_home), que es justo lo que la paginación evita hacer para TODO
-    el pool de una. Filtrar/contar por Switch acá implicaría consultar
-    DekuDeals para cientos de candidatos en cada pedido, perdiendo la
-    gracia de pedir solo la página que se está mostrando.
+    puede ser un subconjunto de {"steam","epic","gog","xbox"} -- Switch
+    queda afuera a propósito: recién se sabe si un candidato está en la
+    eShop DESPUÉS de consultarlo uno por uno contra DekuDeals (ver
+    enrich() en route_home), que es justo lo que la paginación evita
+    hacer para TODO el pool de una. Filtrar/contar por Switch acá
+    implicaría consultar DekuDeals para cientos de candidatos en cada
+    pedido, perdiendo la gracia de pedir solo la página que se está
+    mostrando. Xbox sí entra acá como las otras tres: se conoce de
+    antemano para TODO el pool (ver xbox_deals), sin costo extra por
+    filtrar.
     """
     out = candidates
     if stores:
-        wanted = set(stores) & {"steam", "epic", "gog"}
+        wanted = set(stores) & {"steam", "epic", "gog", "xbox"}
         if wanted:
             out = [c for c in out if wanted & set(c.keys())]
     if min_discount:
@@ -1590,7 +2252,7 @@ def home_facets(candidates, stores=None, min_discount=0, price_min=None, price_m
     )
     store_counts = {
         store: sum(1 for c in base_for_stores if store in c)
-        for store in ("steam", "epic", "gog")
+        for store in ("steam", "epic", "gog", "xbox")
     }
 
     base_for_discount = _filter_candidates(
@@ -1682,9 +2344,19 @@ def route_home():
     # como parte del mismo refresco secuencial-con-pausas que ya existe
     # para sus precios (ver _refresh_steam_global_deals) -- de ahí sale
     # directo en las claves "epic"/"gog" del candidato, igual que antes.
+    #
+    # Mismo criterio para Steam: antes acá se llamaba a steam_price(appid)
+    # EN VIVO para cualquier candidato sin "steam" ya mergeado (los que
+    # vienen solo de Epic/GOG) -- con hasta 10 en paralelo por página, eso
+    # terminó baneando a Nico de Steam/Akamai otra vez (reportado como
+    # "un monton de juegos... con no disponible en steam cuando si estan
+    # disponibles" después de tener la app abierta un rato). Ahora eso se
+    # resuelve DENTRO de home_candidates, secuencial-con-pausas, una vez
+    # por hora (ver el comentario grande ahí, junto a with_appid) -- acá
+    # ya no se le pega a Steam para nada, solo se lee lo que haya quedado.
     def enrich(c):
         appid = c["steam_appid"]
-        sp = c.get("steam") or steam_price(appid)
+        sp = c.get("steam") or {"available": False}
         deku = dekudeals_check(appid)
         return c, sp, deku
 
@@ -1724,6 +2396,8 @@ def route_home():
                 pc_results.append({**c["epic"], "name": c["name"]})
             if "gog" in c:
                 pc_results.append({**c["gog"], "name": c["name"]})
+            if "xbox" in c:
+                pc_results.append({**c["xbox"], "name": c["name"]})
 
     return jsonify(
         {

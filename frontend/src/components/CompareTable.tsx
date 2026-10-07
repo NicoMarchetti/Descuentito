@@ -216,7 +216,7 @@ function buildGameGroups(data: CompareResponse): GameGroup[] {
   }
 
   for (const p of data.pc_stores) {
-    const store: StoreKey = p.store === "GOG" ? "gog" : "epic";
+    const store: StoreKey = p.store === "GOG" ? "gog" : p.store === "Xbox" ? "xbox" : "epic";
     const g = getGroup(p.name);
     setImage(g, p.thumb);
     addRow(g, {

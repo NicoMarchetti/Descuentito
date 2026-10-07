@@ -20,11 +20,11 @@ export function compare(query: string): Promise<CompareResponse> {
 export type HomeSort = "descuento" | "precio" | "relevancia" | "mas_vendidas";
 
 // Filtros del sidebar -- todos opcionales, ver app.py (route_home) para
-// el detalle de cómo se aplican. "stores" acá solo puede traer
-// "steam"/"epic"/"gog" (Switch no se puede filtrar desde /api/home, ver
-// el comentario en _filter_candidates del backend).
+// el detalle de cómo se aplican. "stores" acá puede traer
+// "steam"/"epic"/"gog"/"xbox" (Switch no se puede filtrar desde /api/home,
+// ver el comentario en _filter_candidates del backend).
 export interface HomeFilters {
-  stores?: ("steam" | "epic" | "gog")[];
+  stores?: ("steam" | "epic" | "gog" | "xbox")[];
   minDiscount?: number;
   priceMin?: number;
   priceMax?: number;
