@@ -102,8 +102,8 @@ export interface WatchlistItem {
   kind: "steam" | "nintendo" | "pc";
   appid?: number;
   slug?: string;
-  // Solo para kind "pc" (seguido directo en Epic/GOG).
-  store?: "epic" | "gog";
+  // Solo para kind "pc" (seguido directo en Epic/GOG/Xbox).
+  store?: "epic" | "gog" | "xbox";
   gameId?: string;
   name: string;
   // Capturada al momento de tocar "+ seguir" (viene de la tarjeta de

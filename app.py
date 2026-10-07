@@ -2442,7 +2442,7 @@ def route_watchlist_deals():
 
     Body JSON: {"items": [{"id": "...", "kind": "steam"|"nintendo"|"pc",
                             "appid"?: number, "slug"?: string,
-                            "store"?: "epic"|"gog", "gameId"?: string,
+                            "store"?: "epic"|"gog"|"xbox", "gameId"?: string,
                             "name": string}, ...]}
     """
     data = request.get_json(silent=True) or {}
@@ -2492,6 +2492,40 @@ def route_watchlist_deals():
                 "steam": sp,
                 "nintendo": deku,
                 "pc_stores": pc_stores,
+                "steam_appid": steam_appid,
+            }
+
+        if kind == "pc" and item.get("store") == "xbox":
+            # Seguido DIRECTO desde una fila de Xbox -- distinto del resto
+            # de "pc" (Epic/GOG), que se identifican por su gameID de
+            # CheapShark. Xbox no pasa por CheapShark: game_id acá es el
+            # productId propio de xbox_deals(), así que se busca ahí
+            # mismo (listado completo ya en memoria, sin pedido nuevo) en
+            # vez de cheapshark_game_deal. El cruce contra las demás
+            # tiendas (Steam/Switch/Epic/GOG) es por NOMBRE, igual que en
+            # todos los demás cruces con Xbox de la app (no hay forma de
+            # hacerlo por ID, Xbox no comparte identificador con nadie más).
+            game_id = item.get("gameId")
+            xbox_deal = next(
+                (d for d in xbox_deals() if d["game_id"] == game_id), None
+            )
+            if not game_id or not xbox_deal:
+                return None
+
+            name = item.get("name", "")
+            steam_matches = steam_search(name)
+            steam_appid = steam_matches[0]["appid"] if steam_matches else None
+            sp = steam_price(steam_appid) if steam_appid else None
+            deku = dekudeals_check(steam_appid) if steam_appid else {"on_switch": False}
+            other_stores = pc_store_exact_matches(name, limit=5)
+
+            return {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "steam": sp,
+                "nintendo": deku,
+                "pc": xbox_deal,
+                "pc_stores": other_stores,
                 "steam_appid": steam_appid,
             }
 
