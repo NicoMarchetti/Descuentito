@@ -1,0 +1,11 @@
+# Configs reales del server -- en el repo solo viven las plantillas
+# (descuentito-backend.service.example, nginx-descuentito.conf.example).
+# Esto evita que el pull en el server vuelva a chocar con tu propia copia
+# editada (con tu usuario/ruta real) cada vez que se actualiza la
+# plantilla -- al tener nombres DISTINTOS, nunca van a pisarse.
+descuentito-backend.service
+nginx-descuentito.conf
+
+__pycache__/
+*.pyc
+node_modules/
