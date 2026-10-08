@@ -206,10 +206,28 @@ export default function App() {
   // sin que el contenido haya cambiado de verdad).
   const filtersKey = JSON.stringify(filters);
 
+  // Se pone en true apenas cambia mode/sort/filtersKey (antes de que el
+  // fetch de la página 1 nueva termine) y vuelve a false cuando termina.
+  // Es una ref (no state) a propósito: el efecto del IntersectionObserver
+  // de más abajo se reconecta en el mismo tick que arranca este fetch,
+  // con un handleLoadMore que todavía cierra sobre el `result`/`loading`
+  // VIEJOS (de antes de filtrar) -- si el sentinel ya estaba visible,
+  // conectar un observer nuevo dispara su callback al toque (así es
+  // IntersectionObserver: notifica el estado actual al conectarse), y ese
+  // handleLoadMore viejo pide "la página siguiente" en base al result
+  // viejo pero con los filtros NUEVOS, pisando has_more/page con una
+  // respuesta que no corresponde al filtro recién aplicado -- eso frena
+  // el scroll infinito justo al clickear una tienda. Chequear esta ref
+  // (siempre al día, nunca stale) en vez de `loading` evita esa carrera.
+  const reloadingRef = useRef(false);
+
   useEffect(() => {
     if (mode === "home") {
       loadedPageRef.current = 1;
-      load(() => home(1, sort, undefined, undefined, filters));
+      reloadingRef.current = true;
+      load(() => home(1, sort, undefined, undefined, filters)).finally(() => {
+        reloadingRef.current = false;
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, sort, filtersKey]);
@@ -269,7 +287,7 @@ export default function App() {
   const loadedPageRef = useRef<number | null>(1);
 
   async function handleLoadMore() {
-    if (!result || !result.has_more || loading) return;
+    if (!result || !result.has_more || loading || reloadingRef.current) return;
     const nextPage = (result.page ?? 1) + 1;
     if (loadingMoreRef.current || loadedPageRef.current === nextPage) return;
     loadingMoreRef.current = true;
