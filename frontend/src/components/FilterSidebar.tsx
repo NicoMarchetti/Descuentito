@@ -163,104 +163,101 @@ export function FilterSidebar({
 
       {!hideHomeFilters && (
         <>
-      <div className="divider my-2" />
+          <div className="divider my-2" />
 
-      <div className="mb-4">
-        <div className="mb-2 font-mono text-[0.65rem] uppercase tracking-wide text-base-content/40">
-          Tienda
-        </div>
-        <div className="flex flex-col gap-1.5">
-          {SIDEBAR_STORES.map((store) => {
-            const meta = STORE_META[store];
-            const count = store === "switch" ? switchCount : facets?.stores?.[store];
-            return (
-              <label
-                key={store}
-                className="flex cursor-pointer items-center justify-between gap-2 text-sm"
-                // En Switch el número crece con el scroll en vez de ser un
-                // total fijo del pool completo -- un tooltip nativo alcanza,
-                // no hace falta un ícono aparte para esto.
-                title={store === "switch" ? "Entre los juegos ya cargados" : undefined}
-              >
-                <span className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    className="checkbox checkbox-success checkbox-sm"
-                    checked={selectedStores.has(store)}
-                    onChange={() => onToggleStore(store)}
-                  />
-                  {meta.label}
-                </span>
-                {count !== undefined && (
-                  <span className="text-xs text-base-content/40">{count}</span>
-                )}
-              </label>
-            );
-          })}
-        </div>
-      </div>
+          <div className="mb-4">
+            <div className="mb-2 font-mono text-[0.65rem] uppercase tracking-wide text-base-content/40">
+              Tienda
+            </div>
+            <div className="flex flex-col gap-1.5">
+              {SIDEBAR_STORES.map((store) => {
+                const meta = STORE_META[store];
 
-      <div className="divider my-2" />
+                return (
+                  <label
+                    key={store}
+                    className="flex cursor-pointer items-center justify-between gap-2 text-sm"
+                    // En Switch el número crece con el scroll en vez de ser un
+                    // total fijo del pool completo -- un tooltip nativo alcanza,
+                    // no hace falta un ícono aparte para esto.
+                    title={store === "switch" ? "Entre los juegos ya cargados" : undefined}
+                  >
+                    <span className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="checkbox checkbox-success checkbox-sm"
+                        checked={selectedStores.has(store)}
+                        onChange={() => onToggleStore(store)}
+                      />
+                      {meta.label}
+                    </span>
 
-      <div className="mb-4">
-        <div className="mb-2 font-mono text-[0.65rem] uppercase tracking-wide text-base-content/40">
-          Descuento mínimo
-        </div>
-        <div className="flex flex-col gap-1.5">
-          {DISCOUNT_TIERS.map((tier) => {
-            const count = facets?.discount?.[String(tier) as "50" | "70" | "90"];
-            const active = minDiscount === tier;
-            return (
-              <label
-                key={tier}
-                className="flex cursor-pointer items-center justify-between gap-2 text-sm"
-              >
-                <span className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    className="checkbox checkbox-success checkbox-sm"
-                    checked={active}
-                    onChange={() => onSetMinDiscount(active ? 0 : tier)}
-                  />
-                  {tier}% o más
-                </span>
-                {count !== undefined && (
-                  <span className="text-xs text-base-content/40">{count}</span>
-                )}
-              </label>
-            );
-          })}
-        </div>
-      </div>
 
-      <div className="divider my-2" />
+                  </label>
+                );
+              })}
+            </div>
+          </div>
 
-      <div>
-        <div className="mb-2 font-mono text-[0.65rem] uppercase tracking-wide text-base-content/40">
-          Precio en ARS
-        </div>
-        <div className="flex items-center gap-2">
-          <input
-            type="number"
-            min={0}
-            inputMode="numeric"
-            placeholder="$ 0"
-            value={priceMin}
-            onChange={(e) => onPriceMinChange(e.target.value)}
-            className="input input-bordered input-sm w-full"
-          />
-          <span className="text-base-content/30">–</span>
-          <input
-            type="number"
-            min={0}
-            inputMode="numeric"
-            placeholder="$ 50.000"
-            value={priceMax}
-            onChange={(e) => onPriceMaxChange(e.target.value)}
-            className="input input-bordered input-sm w-full"
-          />
-        </div>
-      </div>
+          <div className="divider my-2" />
+
+          <div className="mb-4">
+            <div className="mb-2 font-mono text-[0.65rem] uppercase tracking-wide text-base-content/40">
+              Descuento mínimo
+            </div>
+            <div className="flex flex-col gap-1.5">
+              {DISCOUNT_TIERS.map((tier) => {
+
+                const active = minDiscount === tier;
+                return (
+                  <label
+                    key={tier}
+                    className="flex cursor-pointer items-center justify-between gap-2 text-sm"
+                  >
+                    <span className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="checkbox checkbox-success checkbox-sm"
+                        checked={active}
+                        onChange={() => onSetMinDiscount(active ? 0 : tier)}
+                      />
+                      {tier}% o más
+                    </span>
+
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="divider my-2" />
+
+          <div>
+            <div className="mb-2 font-mono text-[0.65rem] uppercase tracking-wide text-base-content/40">
+              Precio en ARS
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                inputMode="numeric"
+                placeholder="$ 0"
+                value={priceMin}
+                onChange={(e) => onPriceMinChange(e.target.value)}
+                className="input input-bordered input-sm w-full"
+              />
+              <span className="text-base-content/30">–</span>
+              <input
+                type="number"
+                min={0}
+                inputMode="numeric"
+                placeholder="$ 50.000"
+                value={priceMax}
+                onChange={(e) => onPriceMaxChange(e.target.value)}
+                className="input input-bordered input-sm w-full"
+              />
+            </div>
+          </div>
         </>
       )}
     </aside>

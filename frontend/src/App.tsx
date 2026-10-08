@@ -165,10 +165,13 @@ export default function App() {
   // encontradas" pero la grilla mostraba 3 tarjetas, porque las otras 6
   // ya estaban arriba en Destacados. Con esto el número que se ve
   // siempre coincide con la cantidad real de tarjetas en pantalla.
+  const visibleStores = mode === "home" && selectedStores.size > 0 ? selectedStores : undefined;
+
   const visibleCount = result
     ? visibleGameCount(result, {
       excludeNames: mode === "home" ? destacadosNames : undefined,
       switchOnly: mode === "home" && switchOnly,
+      visibleStores,
     })
     : undefined;
 
@@ -286,11 +289,27 @@ export default function App() {
   const loadingMoreRef = useRef(false);
   const loadedPageRef = useRef<number | null>(1);
 
+  // Con un filtro que deja pocos resultados, page_size=8 (ver route_home
+  // en el backend) no alcanza para llenar la pantalla: el sentinel queda
+  // visible incluso después de cargar una página, así que el observer
+  // dispara handleLoadMore de nuevo casi al instante, y eso puede repetirse
+  // varias veces seguidas hasta llenar el viewport o agotar el pool. Cada
+  // vuelta es rápida (el backend ya tiene todo en memoria), así que
+  // prender/apagar el skeleton de "cargando más" en cada una se ve como un
+  // parpadeo constante. Este timer retrasa el apagado: si llega otra
+  // tanda antes de que se cumpla, se cancela y el skeleton queda prendido
+  // sin cortes durante toda la racha, apagándose una sola vez al final.
+  const loadingMoreHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   async function handleLoadMore() {
     if (!result || !result.has_more || loading || reloadingRef.current) return;
     const nextPage = (result.page ?? 1) + 1;
     if (loadingMoreRef.current || loadedPageRef.current === nextPage) return;
     loadingMoreRef.current = true;
+    if (loadingMoreHideTimerRef.current) {
+      clearTimeout(loadingMoreHideTimerRef.current);
+      loadingMoreHideTimerRef.current = null;
+    }
     setLoadingMore(true);
     setError(null);
     try {
@@ -310,7 +329,10 @@ export default function App() {
       setError((err as Error).message);
     } finally {
       loadingMoreRef.current = false;
-      setLoadingMore(false);
+      loadingMoreHideTimerRef.current = setTimeout(() => {
+        setLoadingMore(false);
+        loadingMoreHideTimerRef.current = null;
+      }, 250);
     }
   }
 
@@ -506,11 +528,7 @@ export default function App() {
                 — Precios que bajaron hoy
               </span>
               <h2 className="text-lg font-bold">Ofertas para jugar más, gastando menos</h2>
-              <p className="text-sm text-base-content/50">
-                {result?.total !== undefined
-                  ? `Comparamos ${result.total.toLocaleString("es-AR")} precios en tiendas oficiales. Elegí, comparás y guardá tus favoritos.`
-                  : "Comparamos precios en tiendas oficiales. Elegí, comparás y guardá tus favoritos."}
-              </p>
+
             </div>
           )}
 
@@ -547,11 +565,7 @@ export default function App() {
             />
 
             <div className="min-w-0 flex-1">
-              {!loading && result && mode === "home" && (
-                <div className="mb-3 font-mono text-xs text-base-content/50">
-                  {(visibleCount ?? 0).toLocaleString("es-AR")} ofertas encontradas
-                </div>
-              )}
+
 
               {loading ? (
                 // Búsqueda nueva o primera carga de inicio: todavía no hay
@@ -568,6 +582,7 @@ export default function App() {
                     searchQuery={mode === "search" ? result.query : undefined}
                     excludeNames={mode === "home" ? destacadosNames : undefined}
                     switchOnly={mode === "home" && switchOnly}
+                    visibleStores={visibleStores}
                   />
                 )
               )}

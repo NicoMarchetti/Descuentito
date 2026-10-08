@@ -29,6 +29,14 @@ interface Props {
    * paginar), esto filtra del lado del cliente, solo entre lo que YA
    * está cargado (ver el comentario largo en App.tsx sobre por qué). */
   switchOnly?: boolean;
+  /** Tiendas tildadas en el sidebar (steam/epic/gog/xbox/switch), cuando
+   * hay alguna marcada. Con esto activo, cada tarjeta solo muestra el/los
+   * renglón(es) de las tiendas elegidas, no todas las que tenga ese
+   * juego -- evita mostrar "Steam: no disponible" (u otras tiendas que
+   * no interesan) en un juego que entró al pool solo por, por ejemplo,
+   * Xbox (ver _merge_xbox_into en el backend: esos candidatos no tienen
+   * steam_appid, así que esa fila nunca iba a tener nada útil igual). */
+  visibleStores?: Set<StoreKey>;
 }
 
 /** Mismo filtrado que hace CompareTable (destacados excluidos + Switch si
@@ -37,11 +45,22 @@ interface Props {
  * ve en la grilla -- antes ese número salía de result.total (el total del
  * backend, sin la exclusión de destacados), así que no coincidía con la
  * cantidad real de tarjetas visibles. */
+function applyRowVisibility(
+  groups: GameGroup[],
+  visibleStores: Set<StoreKey> | undefined,
+): GameGroup[] {
+  if (!visibleStores || visibleStores.size === 0) return groups;
+  return groups
+    .map((g) => ({ ...g, rows: g.rows.filter((r) => visibleStores.has(r.store)) }))
+    .filter((g) => g.rows.length > 0);
+}
+
 export function visibleGameCount(
   data: CompareResponse,
-  options?: { excludeNames?: Set<string>; switchOnly?: boolean },
+  options?: { excludeNames?: Set<string>; switchOnly?: boolean; visibleStores?: Set<StoreKey> },
 ): number {
-  return buildGameGroups(data)
+  const groups = applyRowVisibility(buildGameGroups(data), options?.visibleStores);
+  return groups
     .filter((g) => !options?.excludeNames?.has(g.id))
     .filter((g) => !options?.switchOnly || g.rows.some((r) => r.store === "switch")).length;
 }
@@ -54,8 +73,9 @@ export function CompareTable({
   searchQuery,
   excludeNames,
   switchOnly,
+  visibleStores,
 }: Props) {
-  const groups = buildGameGroups(data)
+  const groups = applyRowVisibility(buildGameGroups(data), visibleStores)
     .filter((g) => !excludeNames?.has(g.id))
     .filter((g) => !switchOnly || g.rows.some((r) => r.store === "switch"));
 

@@ -44,6 +44,21 @@ Requisitos:
 Correr:
   python app.py
   (levanta en http://localhost:5000)
+
+IMPORTANTE -- este backend NO puede correr como función serverless (Vercel,
+Lambda, etc.), solo como proceso persistente (gunicorn/systemd en un
+server propio, ver descuentito-backend.service.example): scheduled_cached
+y cached() (ver más abajo) guardan todo en variables de módulo (_SCHEDULED,
+_CACHE) y actualizan esos datos con hilos de fondo que corren durante
+HORAS -- una función serverless arranca un contenedor nuevo (o congela/
+recicla el que ya tenía) en cada invocación, así que ese estado y esos
+hilos nunca llegan a sobrevivir entre pedidos. El repo tuvo durante un
+tiempo un api/index.py pensado para desplegar esto como función de Vercel
+(reexportando este mismo `app`) -- SE SACÓ a propósito: con eso puesto, la
+home cargaba pocos juegos y se quedaba pegada al azar (según a qué
+contenedor, con qué estado, tocara cada pedido), exactamente el reporte
+de Nico ("a veces deja de cargar juegos"). El frontend en Vercel apunta
+ahora al backend real vía VITE_API_BASE (ver frontend/.env.example).
 """
 
 import base64
@@ -942,18 +957,49 @@ def _merge_xbox_into(candidates_list):
     candidatos crudos. Además, como los candidatos son los MISMOS objetos
     mientras no venza el caché de 1 hora, un candidato que ya tiene
     "xbox" pegado se salta (no recalcula nada de nuevo para él).
+
+    Además de pegar el precio sobre candidatos YA EXISTENTES (que llegaron
+    por Steam/Epic/GOG), agrega como candidatos NUEVOS los juegos que
+    están en oferta en Xbox pero no en ninguna de esas otras tres fuentes
+    -- antes esos quedaban afuera del pool por completo: filtrar "solo
+    Xbox" en el sidebar mostraba nada más que la intersección con las
+    otras tiendas (Nico: "si Xbox devuelve todos los juegos de una,
+    deberían aparecer más al filtrar"). Van sin steam_appid (no hay forma
+    de saberlo solo con el nombre) -- route_home ya sabe saltear el
+    chequeo de Switch cuando no hay appid, y "seguir" en esas tarjetas usa
+    el mismo mecanismo que ya existe para Epic/GOG sin Steam (kind "pc",
+    por game_id de Xbox). Es idempotente: una vez agregado, el candidato
+    nuevo YA tiene "xbox" pegado, así que la próxima vuelta lo cuenta como
+    "ya tiene game_id" y no lo vuelve a sumar.
     """
     index = _xbox_variant_index()
     matched_now = 0
+    existing_game_ids = set()
     for c in candidates_list:
         if "xbox" in c:
+            existing_game_ids.add(c["xbox"]["game_id"])
             continue
         for variant in _xbox_name_variants(c["name"]):
             hits = index.get(variant)
             if hits:
                 c["xbox"] = hits[0]
+                existing_game_ids.add(hits[0]["game_id"])
                 matched_now += 1
                 break
+
+    for d in xbox_deals():
+        if d["game_id"] in existing_game_ids:
+            continue
+        existing_game_ids.add(d["game_id"])
+        candidates_list.append(
+            {
+                "name": d["name"],
+                "tiny_image": d.get("thumb"),
+                "steam_appid": None,
+                "xbox": d,
+            }
+        )
+
     _xbox_last_matched["matched"] = sum(1 for c in candidates_list if "xbox" in c)
     _xbox_last_matched["total"] = len(xbox_deals())
     _xbox_last_matched["ts"] = time.time()
@@ -2357,7 +2403,16 @@ def route_home():
     def enrich(c):
         appid = c["steam_appid"]
         sp = c.get("steam") or {"available": False}
-        deku = dekudeals_check(appid)
+        # Candidatos agregados SOLO por Xbox (ver _merge_xbox_into) no
+        # tienen steam_appid -- no hay forma de saber si están en la
+        # eShop de Switch sin ese ID, así que ni se le pega a DekuDeals
+        # (pedido desperdiciado, 404 seguro). Tampoco tiene sentido armar
+        # un "steam_result" para ellos: no hay appid con el que enlazar a
+        # la tienda de Steam ni con el que armar el identificador de
+        # "seguir" de tipo steam -- esos juegos llegan al frontend
+        # enteros por "pc_results" más abajo (mismo mecanismo que ya usan
+        # Epic/GOG), con su propio "seguir" por game_id de Xbox.
+        deku = dekudeals_check(appid) if appid else {"on_switch": False}
         return c, sp, deku
 
     matched = []
@@ -2366,31 +2421,32 @@ def route_home():
 
     with ThreadPoolExecutor(max_workers=10) as pool:
         for i, (c, sp, deku) in enumerate(pool.map(enrich, page_candidates)):
-            steam_result = {
-                "appid": c["steam_appid"],
-                "name": c["name"],
-                "tiny_image": c["tiny_image"],
-                "price": sp,
-                # Posición real de este candidato en la lista COMPLETA (no
-                # solo en esta página) -- ver el comentario largo en
-                # buildGameGroups del frontend (CompareTable.tsx): "matched"
-                # y "steam_only" son dos arrays separados, y como el scroll
-                # infinito los va acumulando por separado página a página,
-                # el frontend no tenía forma de saber el orden real entre
-                # ambos -- terminaba mostrando TODO "matched" antes que TODO
-                # "steam_only" sin importar de qué página vino cada uno (un
-                # juego con versión de Switch cargado en la página 3 se
-                # colaba arriba de uno sin Switch que ya se había mostrado
-                # desde la página 1). Con este índice, el front puede
-                # fusionar los dos arrays respetando el orden real.
-                "order": start + i,
-            }
-            if deku.get("on_switch"):
-                matched.append(
-                    {"name": c["name"], "steam": steam_result, "nintendo": deku}
-                )
-            else:
-                not_on_switch.append(steam_result)
+            if c["steam_appid"]:
+                steam_result = {
+                    "appid": c["steam_appid"],
+                    "name": c["name"],
+                    "tiny_image": c["tiny_image"],
+                    "price": sp,
+                    # Posición real de este candidato en la lista COMPLETA (no
+                    # solo en esta página) -- ver el comentario largo en
+                    # buildGameGroups del frontend (CompareTable.tsx): "matched"
+                    # y "steam_only" son dos arrays separados, y como el scroll
+                    # infinito los va acumulando por separado página a página,
+                    # el frontend no tenía forma de saber el orden real entre
+                    # ambos -- terminaba mostrando TODO "matched" antes que TODO
+                    # "steam_only" sin importar de qué página vino cada uno (un
+                    # juego con versión de Switch cargado en la página 3 se
+                    # colaba arriba de uno sin Switch que ya se había mostrado
+                    # desde la página 1). Con este índice, el front puede
+                    # fusionar los dos arrays respetando el orden real.
+                    "order": start + i,
+                }
+                if deku.get("on_switch"):
+                    matched.append(
+                        {"name": c["name"], "steam": steam_result, "nintendo": deku}
+                    )
+                else:
+                    not_on_switch.append(steam_result)
 
             if "epic" in c:
                 pc_results.append({**c["epic"], "name": c["name"]})
