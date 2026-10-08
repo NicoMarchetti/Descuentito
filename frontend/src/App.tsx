@@ -13,6 +13,18 @@ import pageIcon from "../src/assets/icons/icon.png";
 type Tab = "comparar" | "seguimiento";
 type Mode = "home" | "search";
 
+// A pedido de Nico: nada de números exactos ("11 ofertas encontradas") --
+// prefiere algo más ambiguo. En vez de sacar el contador del todo (se
+// pierde la señal de "hay poco" vs "hay un montón"), unos baldes
+// cualitativos mantienen esa señal sin el número puntual.
+function ofertasAmbiguas(count: number): string {
+  if (count <= 0) return "sin ofertas por ahora";
+  if (count <= 5) return "pocas ofertas por ahora";
+  if (count <= 20) return "algunas ofertas dando vueltas";
+  if (count <= 60) return "varias ofertas para elegir";
+  return "un montón de ofertas";
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("comparar");
   const [theme, setTheme] = useState<"descuentito" | "descuentito-dark">(
@@ -528,7 +540,9 @@ export default function App() {
                 — Precios que bajaron hoy
               </span>
               <h2 className="text-lg font-bold">Ofertas para jugar más, gastando menos</h2>
-
+              <p className="text-sm text-base-content/50">
+                Comparamos precios en tiendas oficiales. Elegí, comparás y guardá tus favoritos.
+              </p>
             </div>
           )}
 
@@ -542,12 +556,6 @@ export default function App() {
               // no tienen ningún efecto, así que se ocultan en vez de
               // mostrar controles que no hacen nada.
               hideHomeFilters={mode !== "home"}
-              facets={result?.facets}
-              // "matched" son justo los juegos YA cargados que SÍ están en
-              // Switch (así los separa route_home) -- ya vienen sin
-              // repetidos (el pool se dedupea por nombre en
-              // home_candidates), así que alcanza con el largo del array.
-              switchCount={mode === "home" ? result?.matched.length : undefined}
               selectedStores={selectedStores}
               onToggleStore={toggleSidebarStore}
               minDiscount={minDiscount}
@@ -565,7 +573,11 @@ export default function App() {
             />
 
             <div className="min-w-0 flex-1">
-
+              {!loading && result && mode === "home" && (
+                <div className="mb-3 font-mono text-xs text-base-content/50">
+                  {ofertasAmbiguas(visibleCount ?? 0)}
+                </div>
+              )}
 
               {loading ? (
                 // Búsqueda nueva o primera carga de inicio: todavía no hay
@@ -598,14 +610,14 @@ export default function App() {
                     ) : (
                       <div className="flex justify-center">
                         <span className="text-sm text-base-content/50">
-                          mostrando {visibleCount ?? 0} de {result.total}
+                          seguí bajando para ver más ofertas
                         </span>
                       </div>
                     )
                   ) : (
                     <div className="flex justify-center">
                       <span className="text-sm text-base-content/50">
-                        eso es todo lo que hay en oferta ahora ({visibleCount ?? 0})
+                        eso es todo lo que hay en oferta ahora
                       </span>
                     </div>
                   )}

@@ -1,5 +1,5 @@
 import type { FormEvent } from "react";
-import type { DolarRate, HomeFacets } from "../lib/types";
+import type { DolarRate } from "../lib/types";
 import { STORE_META } from "./OfferGrid";
 
 const SIDEBAR_STORES = ["steam", "epic", "gog", "xbox", "switch"] as const;
@@ -13,13 +13,6 @@ interface Props {
   onSearch: (e: FormEvent) => void;
   /** true en modo búsqueda: tienda/descuento/precio no hacen nada ahí (solo filtran /api/home), así que se ocultan. */
   hideHomeFilters?: boolean;
-  facets?: HomeFacets;
-  /** Cuántos de los juegos YA CARGADOS tienen versión de Switch -- a
-   * diferencia de los conteos de facets (steam/epic/gog), que el
-   * backend calcula sobre el pool COMPLETO antes de paginar, este es un
-   * número que crece a medida que entran más páginas (ver el comentario
-   * en App.tsx). */
-  switchCount?: number;
   selectedStores: Set<SidebarStore>;
   onToggleStore: (store: SidebarStore) => void;
   minDiscount: number;
@@ -38,21 +31,14 @@ interface Props {
 
 // Sidebar de filtros calcado del prototipo de Figma: tienda (checkboxes,
 // multi-selección), descuento mínimo (un solo umbral a la vez) y rango
-// de precio en ARS. Los números al lado de steam/epic/gog vienen del
-// backend (home_facets en app.py) -- cuántas ofertas quedarían si además
-// marcás esa opción, calculado sobre el pool COMPLETO antes de paginar.
-// Switch es distinto: su conteo (switchCount) y su filtro son del lado
-// del CLIENTE, solo sobre lo que ya está cargado en pantalla -- no hay
-// forma barata de saber de antemano qué candidatos del pool completo
-// tienen Switch sin consultar DekuDeals uno por uno (ver el comentario
-// en App.tsx, junto a selectedStores).
+// de precio en ARS. A pedido de Nico, sin los números al lado de cada
+// opción (cuántas ofertas quedarían) -- prefiere algo más ambiguo, igual
+// que el contador general de la grilla (ver ofertasAmbiguas en App.tsx).
 export function FilterSidebar({
   query,
   onQueryChange,
   onSearch,
   hideHomeFilters,
-  facets,
-  switchCount,
   selectedStores,
   onToggleStore,
   minDiscount,
@@ -172,7 +158,6 @@ export function FilterSidebar({
             <div className="flex flex-col gap-1.5">
               {SIDEBAR_STORES.map((store) => {
                 const meta = STORE_META[store];
-
                 return (
                   <label
                     key={store}
@@ -191,8 +176,6 @@ export function FilterSidebar({
                       />
                       {meta.label}
                     </span>
-
-
                   </label>
                 );
               })}
@@ -207,7 +190,6 @@ export function FilterSidebar({
             </div>
             <div className="flex flex-col gap-1.5">
               {DISCOUNT_TIERS.map((tier) => {
-
                 const active = minDiscount === tier;
                 return (
                   <label
@@ -223,7 +205,6 @@ export function FilterSidebar({
                       />
                       {tier}% o más
                     </span>
-
                   </label>
                 );
               })}
