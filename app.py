@@ -2363,8 +2363,18 @@ def home_candidates(sort="descuento", only_discounted=False):
         with_appid = [c for c in candidates.values() if c["steam_appid"]]
 
         def best_discount(c):
+            # .get(..., 0) y no c[k]["discount_percent"] directo -- BUG
+            # REAL encontrado (Nico: 500 en /api/home, KeyError
+            # 'discount_percent'): steam_price() devuelve, para un juego
+            # GRATIS en Steam, {"available": True, "is_free": True,
+            # "name": ...} SIN discount_percent (ni ningún otro campo de
+            # precio) -- y ese dict llega tal cual a c["steam"] vía
+            # epic_gog_steam_prices() (resolved_prices, ver más abajo) para
+            # un candidato que llegó solo por Epic/GOG. Puede pasar con
+            # cualquier tienda en teoría, no solo Steam, así que el fix va
+            # acá en general.
             return max(
-                (c[k]["discount_percent"] for k in ("steam", "epic", "gog", "xbox", "playstation") if k in c),
+                (c[k].get("discount_percent", 0) for k in ("steam", "epic", "gog", "xbox", "playstation") if k in c),
                 default=0,
             )
 
@@ -2532,8 +2542,12 @@ _warm_home_candidates_cache()
 
 
 def _candidate_best_discount(c):
+    # Mismo fix que el best_discount de adentro de fetch() (ver el
+    # comentario grande ahí): .get(..., 0), nunca ["discount_percent"]
+    # directo -- un juego gratis en Steam resuelto vía
+    # epic_gog_steam_prices() llega sin esa clave.
     return max(
-        (c[k]["discount_percent"] for k in ("steam", "epic", "gog", "xbox", "playstation") if k in c),
+        (c[k].get("discount_percent", 0) for k in ("steam", "epic", "gog", "xbox", "playstation") if k in c),
         default=0,
     )
 
