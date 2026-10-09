@@ -21,10 +21,10 @@ export type HomeSort = "descuento" | "precio" | "relevancia" | "mas_vendidas";
 
 // Filtros del sidebar -- todos opcionales, ver app.py (route_home) para
 // el detalle de cómo se aplican. "stores" acá puede traer
-// "steam"/"epic"/"gog"/"xbox" (Switch no se puede filtrar desde /api/home,
-// ver el comentario en _filter_candidates del backend).
+// "steam"/"epic"/"gog"/"xbox"/"playstation" (Switch no se puede filtrar
+// desde /api/home, ver el comentario en _filter_candidates del backend).
 export interface HomeFilters {
-  stores?: ("steam" | "epic" | "gog" | "xbox")[];
+  stores?: ("steam" | "epic" | "gog" | "xbox" | "playstation")[];
   minDiscount?: number;
   priceMin?: number;
   priceMax?: number;

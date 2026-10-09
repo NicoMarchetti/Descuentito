@@ -19,7 +19,13 @@ export function addLocalWatchlistItem(
   target:
     | { kind: "steam"; appid: number; name: string; image?: string }
     | { kind: "nintendo"; slug: string; name: string; image?: string }
-    | { kind: "pc"; store: "epic" | "gog" | "xbox"; gameId: string; name: string; image?: string },
+    | {
+        kind: "pc";
+        store: "epic" | "gog" | "xbox" | "playstation";
+        gameId: string;
+        name: string;
+        image?: string;
+      },
 ): WatchlistItem[] {
   const id =
     target.kind === "steam"

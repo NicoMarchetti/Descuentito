@@ -2,7 +2,7 @@ import type { FormEvent } from "react";
 import type { DolarRate } from "../lib/types";
 import { STORE_META } from "./OfferGrid";
 
-const SIDEBAR_STORES = ["steam", "epic", "gog", "xbox", "switch"] as const;
+const SIDEBAR_STORES = ["steam", "epic", "gog", "xbox", "playstation", "switch"] as const;
 type SidebarStore = (typeof SIDEBAR_STORES)[number];
 
 const DISCOUNT_TIERS = [50, 70, 90] as const;

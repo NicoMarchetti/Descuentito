@@ -29,7 +29,7 @@ interface Props {
    * paginar), esto filtra del lado del cliente, solo entre lo que YA
    * está cargado (ver el comentario largo en App.tsx sobre por qué). */
   switchOnly?: boolean;
-  /** Tiendas tildadas en el sidebar (steam/epic/gog/xbox/switch), cuando
+  /** Tiendas tildadas en el sidebar (steam/epic/gog/xbox/playstation/switch), cuando
    * hay alguna marcada. Con esto activo, cada tarjeta solo muestra el/los
    * renglón(es) de las tiendas elegidas, no todas las que tenga ese
    * juego -- evita mostrar "Steam: no disponible" (u otras tiendas que
@@ -236,7 +236,14 @@ function buildGameGroups(data: CompareResponse): GameGroup[] {
   }
 
   for (const p of data.pc_stores) {
-    const store: StoreKey = p.store === "GOG" ? "gog" : p.store === "Xbox" ? "xbox" : "epic";
+    const store: StoreKey =
+      p.store === "GOG"
+        ? "gog"
+        : p.store === "Xbox"
+          ? "xbox"
+          : p.store === "PlayStation"
+            ? "playstation"
+            : "epic";
     const g = getGroup(p.name);
     setImage(g, p.thumb);
     addRow(g, {

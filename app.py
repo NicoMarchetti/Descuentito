@@ -1006,6 +1006,304 @@ def _merge_xbox_into(candidates_list):
     return matched_now
 
 
+# ---------------------------------------------------------------------------
+# PlayStation Store
+# ---------------------------------------------------------------------------
+#
+# La categoría "Todas las ofertas" (id fijo, PS_DEALS_CATEGORY_ID) de
+# store.playstation.com es un GraphQL persisted query (categoryGridRetrieve)
+# paginado por offset/size -- a diferencia de Xbox (que pagina con un
+# cursor opaco), acá alcanza con pedir offset=0,24,48... hasta que la
+# propia respuesta diga "isLast": true. Mismo patrón que el resto de los
+# barridos "una vez por día" de esta app: secuencial, con pausa entre
+# pedidos, cacheado con scheduled_cached. Capturado por Nico desde
+# DevTools mientras navegaba esa categoría en la web real.
+#
+# El endpoint usa Automatic Persisted Queries (APQ): en vez de mandar la
+# query GraphQL completa, se manda solo su hash SHA-256
+# (PS_DEALS_QUERY_HASH) -- el server ya la tiene cacheada (es la misma
+# query que usa la propia página), así que no hace falta reconstruirla acá.
+#
+# El server también exige el header "apollo-require-preflight" (chequeo
+# anti-CSRF de Apollo Server para pedidos GET, documentado por Apollo) --
+# sin este header devuelve 400 con un error de CSRF, aunque el
+# "content-type: application/json" esté bien puesto (confirmado con Nico:
+# el curl sin este header fallaba con ese error exacto).
+#
+# Mismo criterio que Xbox: PlayStation no tiene un buscador propio desde
+# acá (esta query es solo el listado curado de ofertas), así que entra
+# "solo como fila extra" -- se cruza por nombre contra el pool, nunca se
+# busca en vivo (ver ps_exact_matches/_merge_ps_into más abajo).
+PS_GRAPHQL_URL = "https://web.np.playstation.com/api/graphql/v1/op"
+PS_DEALS_CATEGORY_ID = "3f772501-f6f8-49b7-abac-874a88ca4897"  # "cat.gma.AllDeals"
+PS_DEALS_QUERY_HASH = "88c0b9a1273c6d320c51cd73e390924e21ae28bf09f01cde8b84b1034b16cd03"
+PS_DEALS_TTL = 24 * 60 * 60  # 1 vez por día, mismo criterio que Steam/CheapShark/Xbox
+PS_PAGE_SIZE = 24
+PS_MAX_PAGES = 250  # ~5000 juegos / 24 por página (totalCount real visto) -- de sobra, con margen
+
+PS_HEADERS = {
+    "accept": "application/json",
+    "accept-language": "es-AR,es;q=0.9,en;q=0.7",
+    "apollographql-client-name": "@sie-ppr-web-store/app",
+    "apollographql-client-version": "0.114.0",
+    "content-type": "application/json",
+    "apollo-require-preflight": "true",
+    "origin": "https://store.playstation.com",
+    "referer": "https://store.playstation.com/",
+    "x-psn-store-locale-override": "es-AR",
+    "user-agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    ),
+}
+
+
+def _ps_fetch_page(offset):
+    variables = {
+        "id": PS_DEALS_CATEGORY_ID,
+        "pageArgs": {"size": PS_PAGE_SIZE, "offset": offset},
+        "sortBy": None,
+        "filterBy": [],
+        "facetOptions": [],
+    }
+    extensions = {"persistedQuery": {"version": 1, "sha256Hash": PS_DEALS_QUERY_HASH}}
+    r = requests.get(
+        PS_GRAPHQL_URL,
+        params={
+            "operationName": "categoryGridRetrieve",
+            "variables": json.dumps(variables, separators=(",", ":")),
+            "extensions": json.dumps(extensions, separators=(",", ":")),
+        },
+        headers=PS_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+# Mismo propósito que _xbox_last_error -- poder ver desde /api/debug/
+# playstation-deals por qué el barrido cortó donde cortó, sin tener que
+# leer logs del server.
+_ps_last_error = {"offset": None, "error": None, "status_code": None}
+_ps_last_matched = {"matched": None, "total": None, "ts": None}
+
+
+def _ps_parse_price(text):
+    """'US$48.99' -> 48.99, 'US$1,234.56' -> 1234.56. None si no hay texto (ej. GRATIS)."""
+    if not text:
+        return None
+    digits = re.sub(r"[^\d.]", "", text.replace(",", ""))
+    try:
+        return float(digits) if digits else None
+    except ValueError:
+        return None
+
+
+def _ps_parse_discount(text):
+    """'-30 %' -> 30. None si no hay texto (sin descuento activo)."""
+    if not text:
+        return None
+    digits = re.sub(r"[^\d]", "", text)
+    return int(digits) if digits else None
+
+
+def _fetch_all_playstation_deals():
+    """
+    fetch_fn de playstation_deals() (ver scheduled_cached): pagina TODA la
+    categoría "Todas las ofertas" de la PlayStation Store, de a
+    PS_PAGE_SIZE por pedido, siguiendo offset/pageInfo.isLast -- siempre
+    secuencial, con pausa entre pedidos, nunca en paralelo, mismo criterio
+    que el resto de los barridos "una vez por día" de esta app.
+    """
+    global _ps_last_error
+    _ps_last_error = {"offset": None, "error": None, "status_code": None}
+    results = []
+    offset = 0
+    for page_num in range(PS_MAX_PAGES):
+        try:
+            data = _ps_fetch_page(offset)
+        except requests.RequestException as e:
+            resp = getattr(e, "response", None)
+            _ps_last_error = {
+                "offset": offset,
+                "error": str(e),
+                "status_code": getattr(resp, "status_code", None),
+                "response_body": (resp.text[:500] if resp is not None else None),
+            }
+            break
+        except ValueError as e:
+            _ps_last_error = {"offset": offset, "error": f"JSON inválido: {e}", "status_code": None}
+            break
+
+        if data.get("errors"):
+            _ps_last_error = {"offset": offset, "error": str(data["errors"])[:500], "status_code": None}
+            break
+
+        grid = (data.get("data") or {}).get("categoryGridRetrieve")
+        if not grid:
+            _ps_last_error = {
+                "offset": offset,
+                "error": f"Sin categoryGridRetrieve en la respuesta -- claves recibidas: {list(data.keys())}",
+                "status_code": None,
+            }
+            break
+
+        for p in grid.get("products") or []:
+            price = p.get("price") or {}
+            # Se descartan los sin descuento activo (precio de lista
+            # completo) y los gratis -- igual que Xbox, esto es un listado
+            # de "ofertas", no el catálogo entero.
+            discount = _ps_parse_discount(price.get("discountText"))
+            if not discount or price.get("isFree"):
+                continue
+
+            thumb = None
+            for m in p.get("media") or []:
+                if m.get("type") == "IMAGE" and m.get("role") in ("MASTER", "GAMEHUB_COVER_ART"):
+                    thumb = m.get("url")
+                    break
+
+            pid = p.get("id")
+            if not pid:
+                continue
+
+            results.append(
+                {
+                    "store": "PlayStation",
+                    "name": (p.get("name") or "").strip(),
+                    # Siempre viene en USD (confirmado: a pesar de pedir
+                    # es-AR en el locale, la store factura en dólares) --
+                    # se convierte a ARS con el mismo conversor que ya usa
+                    # el resto del sitio para Epic/GOG.
+                    "currency": "USD",
+                    "initial_price": _ps_parse_price(price.get("basePrice")),
+                    "final_price": _ps_parse_price(price.get("discountedPrice")),
+                    "discount_percent": discount,
+                    "deal_url": f"https://store.playstation.com/es-ar/product/{pid}",
+                    "thumb": thumb,
+                    "game_id": pid,
+                }
+            )
+
+        page_info = grid.get("pageInfo") or {}
+        if page_info.get("isLast", True):
+            break
+        offset += PS_PAGE_SIZE
+        if page_num < PS_MAX_PAGES - 1:
+            time.sleep(random.uniform(1.0, 2.0))
+
+    return results
+
+
+def playstation_deals():
+    deals = scheduled_cached(
+        "playstation_deals", _fetch_all_playstation_deals, interval_seconds=PS_DEALS_TTL
+    )
+    return deals if deals is not None else []
+
+
+# Mismo problema que Xbox (ver el comentario grande junto a
+# _XBOX_TRADEMARK_RE): PlayStation nombra sus fichas distinto a Steam para
+# el mismo juego ("Marvel's Spider-Man: Game of the Year Edition" vs
+# "Marvel's Spider-Man"), así que se recorta el sufijo de edición antes de
+# comparar. Se reutiliza la MISMA regex de sufijos que Xbox (son genéricos
+# de la industria, no específicos de una tienda) pero con su propio
+# símbolo de marca registrada por separado, para no atar un cambio futuro
+# en uno a el otro por accidente.
+_PS_TRADEMARK_RE = re.compile(r"[®™©]")
+
+
+def _ps_strip_trademark(name):
+    return _PS_TRADEMARK_RE.sub(" ", name)
+
+
+def _ps_name_key(name):
+    base = _ps_strip_trademark(name).strip()
+    base = re.sub(r"\s+", " ", base)
+    return base.lower()
+
+
+def _ps_name_variants(name):
+    base_key = _ps_name_key(name)
+    variants = {base_key}
+    stripped = _XBOX_EDITION_SUFFIX_RE.sub("", _ps_strip_trademark(name).strip())
+    stripped = re.sub(r"\s+", " ", stripped).strip().lower()
+    if stripped:
+        variants.add(stripped)
+    return variants
+
+
+_ps_variant_index_cache = {"ts": None, "index": {}}
+
+
+def _ps_variant_index():
+    """Mismo propósito que _xbox_variant_index: evita recalcular variantes en cada pedido."""
+    entry = _SCHEDULED.get("playstation_deals")
+    ts = entry["ts"] if entry else None
+    if _ps_variant_index_cache["ts"] != ts:
+        index = {}
+        for d in playstation_deals():
+            for variant in _ps_name_variants(d["name"]):
+                index.setdefault(variant, []).append(d)
+        _ps_variant_index_cache["ts"] = ts
+        _ps_variant_index_cache["index"] = index
+    return _ps_variant_index_cache["index"]
+
+
+def ps_exact_matches(name):
+    """Mismo criterio normalizado que el merge de home_candidates, para /api/compare (búsqueda manual)."""
+    index = _ps_variant_index()
+    seen_ids = set()
+    results = []
+    for variant in _ps_name_variants(name):
+        for d in index.get(variant, ()):
+            if d["game_id"] not in seen_ids:
+                seen_ids.add(d["game_id"])
+                results.append(d)
+    return results
+
+
+def _merge_ps_into(candidates_list):
+    """
+    Mismo mecanismo que _merge_xbox_into (ver el comentario grande ahí
+    para el porqué de cada decisión: por qué FUERA del caché de 1 hora,
+    por qué agrega candidatos nuevos sin steam_appid para lo que no
+    matchea con nada) -- acá solo el equivalente para PlayStation.
+    """
+    index = _ps_variant_index()
+    matched_now = 0
+    existing_game_ids = set()
+    for c in candidates_list:
+        if "playstation" in c:
+            existing_game_ids.add(c["playstation"]["game_id"])
+            continue
+        for variant in _ps_name_variants(c["name"]):
+            hits = index.get(variant)
+            if hits:
+                c["playstation"] = hits[0]
+                existing_game_ids.add(hits[0]["game_id"])
+                matched_now += 1
+                break
+
+    for d in playstation_deals():
+        if d["game_id"] in existing_game_ids:
+            continue
+        existing_game_ids.add(d["game_id"])
+        candidates_list.append(
+            {
+                "name": d["name"],
+                "tiny_image": d.get("thumb"),
+                "steam_appid": None,
+                "playstation": d,
+            }
+        )
+
+    _ps_last_matched["matched"] = sum(1 for c in candidates_list if "playstation" in c)
+    _ps_last_matched["total"] = len(playstation_deals())
+    _ps_last_matched["ts"] = time.time()
+    return matched_now
+
+
 CHEAPSHARK_PAGE_SIZE = 60  # tope real de la API de CheapShark -- pedir más por página no funciona, hay que paginar.
 
 
@@ -1603,6 +1901,30 @@ def route_debug_xbox_deals():
     )
 
 
+@app.get("/api/debug/playstation-deals")
+def route_debug_playstation_deals():
+    """Mismo propósito que /api/debug/xbox-deals pero para PlayStation."""
+    entry = _SCHEDULED.get("playstation_deals", {"data": None, "ts": 0.0, "refreshing": False})
+    deals = entry["data"] or []
+    age_sec = round(time.time() - entry["ts"]) if entry["ts"] else None
+    return jsonify(
+        {
+            "count": len(deals),
+            "sample_names": [d["name"] for d in deals[:5]],
+            "cache_age_sec": age_sec,
+            "refreshing_now": entry["refreshing"],
+            "last_error": _ps_last_error,
+            "matched_into_pool": _ps_last_matched["matched"],
+            "matched_pool_total_playstation": _ps_last_matched["total"],
+            "matched_age_sec": (
+                round(time.time() - _ps_last_matched["ts"])
+                if _ps_last_matched["ts"]
+                else None
+            ),
+        }
+    )
+
+
 @app.get("/api/debug/epic-gog-steam")
 def route_debug_epic_gog_steam():
     """
@@ -1713,7 +2035,11 @@ def compare_steam_results(steam_results, with_prices=True):
         # motivo que en route_home (ver el comentario grande ahí): sin
         # filtrar, CheapShark también trae DLCs/bundles con título
         # parecido como si fueran el juego mismo.
-        pc = pc_store_exact_matches(s["name"], limit=10) + xbox_exact_matches(s["name"])
+        pc = (
+            pc_store_exact_matches(s["name"], limit=10)
+            + xbox_exact_matches(s["name"])
+            + ps_exact_matches(s["name"])
+        )
         return s, sp, deku, pc
 
     matched = []
@@ -1764,12 +2090,13 @@ def route_compare():
         if d["name"].strip().lower() not in already_matched_names
     ]
 
-    # pc_store_search(q) + xbox_exact_matches(q) siguen siendo útiles
-    # ADEMÁS (cubren un juego de Epic/GOG que ni apareció en la búsqueda
-    # de Steam, o el caso borde de que alguien sí escriba el título
-    # completo) -- se combinan con lo de arriba, sin duplicar la misma
-    # oferta dos veces (puede pisarse si el nombre coincide en ambos).
-    pc_stores = pc_store_search(q) + xbox_exact_matches(q)
+    # pc_store_search(q) + xbox_exact_matches(q) + ps_exact_matches(q)
+    # siguen siendo útiles ADEMÁS (cubren un juego de Epic/GOG que ni
+    # apareció en la búsqueda de Steam, o el caso borde de que alguien sí
+    # escriba el título completo) -- se combinan con lo de arriba, sin
+    # duplicar la misma oferta dos veces (puede pisarse si el nombre
+    # coincide en ambos).
+    pc_stores = pc_store_search(q) + xbox_exact_matches(q) + ps_exact_matches(q)
     seen_pc = {(p.get("store"), p.get("game_id")) for p in pc_stores}
     for p in pc_from_steam_names:
         key = (p.get("store"), p.get("game_id"))
@@ -2037,7 +2364,7 @@ def home_candidates(sort="descuento", only_discounted=False):
 
         def best_discount(c):
             return max(
-                (c[k]["discount_percent"] for k in ("steam", "epic", "gog", "xbox") if k in c),
+                (c[k]["discount_percent"] for k in ("steam", "epic", "gog", "xbox", "playstation") if k in c),
                 default=0,
             )
 
@@ -2168,12 +2495,13 @@ def home_candidates(sort="descuento", only_discounted=False):
     if candidates is None:
         return []
 
-    # Xbox se pega ACÁ, fuera del caché de 1 hora de arriba -- ver el
-    # comentario grande en _merge_xbox_into sobre por qué (la versión
-    # anterior, adentro de fetch(), quedaba pegada al snapshot de Xbox
-    # del momento exacto del cálculo, que en el primer arranque del
-    # proceso casi siempre está vacío).
+    # Xbox y PlayStation se pegan ACÁ, fuera del caché de 1 hora de arriba
+    # -- ver el comentario grande en _merge_xbox_into sobre por qué (la
+    # versión anterior, adentro de fetch(), quedaba pegada al snapshot del
+    # momento exacto del cálculo, que en el primer arranque del proceso
+    # casi siempre está vacío).
     _merge_xbox_into(candidates)
+    _merge_ps_into(candidates)
     return candidates
 
 
@@ -2196,6 +2524,7 @@ def _warm_home_candidates_cache():
     # calls de arriba. Son jobs propios (scheduled_cached), así que esto
     # solo DISPARA sus hilos de fondo, no bloquea nada acá.
     xbox_deals()
+    playstation_deals()
     epic_gog_steam_prices()
 
 
@@ -2204,7 +2533,7 @@ _warm_home_candidates_cache()
 
 def _candidate_best_discount(c):
     return max(
-        (c[k]["discount_percent"] for k in ("steam", "epic", "gog", "xbox") if k in c),
+        (c[k]["discount_percent"] for k in ("steam", "epic", "gog", "xbox", "playstation") if k in c),
         default=0,
     )
 
@@ -2238,7 +2567,7 @@ def _candidate_price_ars(c, rate):
             return price["final_price"] * rate
         return None
 
-    for k in ("steam", "epic", "gog", "xbox"):
+    for k in ("steam", "epic", "gog", "xbox", "playstation"):
         if k in c:
             value = in_ars(c[k])
             if value is not None:
@@ -2262,7 +2591,7 @@ def _filter_candidates(candidates, stores=None, min_discount=0, price_min=None, 
     """
     out = candidates
     if stores:
-        wanted = set(stores) & {"steam", "epic", "gog", "xbox"}
+        wanted = set(stores) & {"steam", "epic", "gog", "xbox", "playstation"}
         if wanted:
             out = [c for c in out if wanted & set(c.keys())]
     if min_discount:
@@ -2298,7 +2627,7 @@ def home_facets(candidates, stores=None, min_discount=0, price_min=None, price_m
     )
     store_counts = {
         store: sum(1 for c in base_for_stores if store in c)
-        for store in ("steam", "epic", "gog", "xbox")
+        for store in ("steam", "epic", "gog", "xbox", "playstation")
     }
 
     base_for_discount = _filter_candidates(
@@ -2454,6 +2783,8 @@ def route_home():
                 pc_results.append({**c["gog"], "name": c["name"]})
             if "xbox" in c:
                 pc_results.append({**c["xbox"], "name": c["name"]})
+            if "playstation" in c:
+                pc_results.append({**c["playstation"], "name": c["name"]})
 
     return jsonify(
         {
@@ -2498,7 +2829,7 @@ def route_watchlist_deals():
 
     Body JSON: {"items": [{"id": "...", "kind": "steam"|"nintendo"|"pc",
                             "appid"?: number, "slug"?: string,
-                            "store"?: "epic"|"gog"|"xbox", "gameId"?: string,
+                            "store"?: "epic"|"gog"|"xbox"|"playstation", "gameId"?: string,
                             "name": string}, ...]}
     """
     data = request.get_json(silent=True) or {}
@@ -2581,6 +2912,34 @@ def route_watchlist_deals():
                 "steam": sp,
                 "nintendo": deku,
                 "pc": xbox_deal,
+                "pc_stores": other_stores,
+                "steam_appid": steam_appid,
+            }
+
+        if kind == "pc" and item.get("store") == "playstation":
+            # Mismo mecanismo que la rama de Xbox de arriba -- PlayStation
+            # tampoco pasa por CheapShark, game_id acá es el id propio de
+            # playstation_deals().
+            game_id = item.get("gameId")
+            ps_deal = next(
+                (d for d in playstation_deals() if d["game_id"] == game_id), None
+            )
+            if not game_id or not ps_deal:
+                return None
+
+            name = item.get("name", "")
+            steam_matches = steam_search(name)
+            steam_appid = steam_matches[0]["appid"] if steam_matches else None
+            sp = steam_price(steam_appid) if steam_appid else None
+            deku = dekudeals_check(steam_appid) if steam_appid else {"on_switch": False}
+            other_stores = pc_store_exact_matches(name, limit=5)
+
+            return {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "steam": sp,
+                "nintendo": deku,
+                "pc": ps_deal,
                 "pc_stores": other_stores,
                 "steam_appid": steam_appid,
             }
