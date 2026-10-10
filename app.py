@@ -2678,6 +2678,18 @@ def route_home():
       eso en TODAS las tiendas donde aparecen.
     ?price_min=<ars>&price_max=<ars> -- precio final en pesos (Epic/GOG
       se convierten con la cotización del dólar tarjeta).
+    ?switch_only=1 -- NO es un filtro real por Switch (seguimos sin poder
+      hacer eso acá, ver arriba): descarta de entrada los candidatos sin
+      steam_appid (los que llegaron solos por Xbox/PlayStation, ver
+      _merge_xbox_into/_merge_ps_into), que NUNCA pueden estar en la eShop
+      -- sin un steam_appid no hay con qué consultar DekuDeals. BUG REAL
+      reportado por Nico (filtro de Switch se quedaba pegado en
+      "cargando"): esos candidatos se agregan al FINAL del pool completo,
+      así que al filtrar por Switch el scroll infinito tenía que paginar
+      a través de varios cientos de ellos (Xbox solo ya son ~660) para
+      encontrar el próximo juego que sí pudiera estar en Switch -- cada
+      uno de esos tramos se veía, para el usuario, como si el filtro se
+      hubiera trabado para siempre, aunque en teoría iba a terminar.
     """
     page = request.args.get("page", default=1, type=int)
     # Default más chico que antes: en Vercel (plan Hobby) cada función
@@ -2697,6 +2709,7 @@ def route_home():
     min_discount = request.args.get("min_discount", default=0, type=int) or 0
     price_min = request.args.get("price_min", type=float)
     price_max = request.args.get("price_max", type=float)
+    switch_only = request.args.get("switch_only") == "1"
 
     full_candidates = home_candidates(sort, only_discounted=only_discounted)
     all_candidates = _filter_candidates(
@@ -2707,6 +2720,11 @@ def route_home():
         price_max=price_max,
         rate=_usd_ars_rate(),
     )
+    if switch_only:
+        # Ver el docstring de arriba (?switch_only=1) -- descarta acá,
+        # ANTES de paginar, lo que ya se sabe que nunca va a poder estar
+        # en Switch (sin steam_appid no hay con qué consultar DekuDeals).
+        all_candidates = [c for c in all_candidates if c["steam_appid"]]
     facets = home_facets(
         full_candidates,
         stores=stores,

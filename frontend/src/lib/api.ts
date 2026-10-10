@@ -28,6 +28,19 @@ export interface HomeFilters {
   minDiscount?: number;
   priceMin?: number;
   priceMax?: number;
+  // true cuando el filtro "Switch" del sidebar está activo -- ver el
+  // comentario grande en App.tsx (switchOnly) sobre por qué Switch no se
+  // puede filtrar como las demás tiendas. Esto NO le pide al backend que
+  // filtre por Switch (sigue sin poder): solo le pide que descarte de
+  // entrada los candidatos que NUNCA van a poder matchear (los que
+  // llegaron SOLO por Xbox/PlayStation, sin steam_appid -- ver
+  // _merge_xbox_into/_merge_ps_into) antes de paginar. Sin esto, con
+  // Xbox+PlayStation sumando varios cientos de candidatos sin appid al
+  // final del pool, el scroll infinito tenía que paginar a través de
+  // TODOS esos (ninguno puede estar en Switch) para encontrar el
+  // siguiente match real -- se veía como si el filtro de Switch se
+  // quedara pegado en "cargando" para siempre.
+  switchOnly?: boolean;
 }
 
 export function home(
@@ -44,6 +57,7 @@ export function home(
   if (filters?.minDiscount) params.set("min_discount", String(filters.minDiscount));
   if (filters?.priceMin !== undefined) params.set("price_min", String(filters.priceMin));
   if (filters?.priceMax !== undefined) params.set("price_max", String(filters.priceMax));
+  if (filters?.switchOnly) params.set("switch_only", "1");
   return getJSON(`/api/home?${params.toString()}`);
 }
 

@@ -125,6 +125,13 @@ export default function App() {
     minDiscount: minDiscount || undefined,
     priceMin,
     priceMax,
+    // Switch sigue sin poder filtrarse DE VERDAD en el backend (ver el
+    // comentario en HomeFilters.switchOnly) -- esto solo le pide que
+    // descarte de entrada los candidatos sin steam_appid (Xbox/PlayStation
+    // solos, que nunca pueden estar en Switch), para que paginar buscando
+    // el próximo match no tenga que atravesar cientos de candidatos que
+    // garantizado no van a matchear.
+    switchOnly: switchOnly || undefined,
   };
 
   // Orden de "todas las ofertas" (la grilla paginada) -- SIN selector:
