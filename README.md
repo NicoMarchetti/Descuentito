@@ -1,15 +1,15 @@
 # DESCUENTITO
 
-Comparador de precios y ofertas de videojuegos en Argentina: **Steam**, **Nintendo eShop AR**, **Epic Games Store** y **GOG**, en un solo lugar.
+Comparador de precios y ofertas de videojuegos en Argentina: **Steam**, **Nintendo eShop AR**, **Epic Games Store**, **GOG**, **Xbox** y **PlayStation**, en un solo lugar.
 
 🔗 [descuentito-seven.vercel.app](https://descuentito-seven.vercel.app/)
 
 ## Qué hace
 
-- Busca un juego y compara su precio en las 4 tiendas al mismo tiempo (el de Nintendo AR en pesos reales, no una conversión)
-- Feed de inicio con las ofertas destacadas del momento, sin buscar nada
+- Feed de inicio con ofertas de las seis tiendas, sin buscar nada — con scroll infinito y filtros combinables por tienda, % de descuento mínimo y rango de precio
+- Busca un juego puntual y lo compara en todas las tiendas donde aparece (el de Nintendo AR en pesos reales, no una conversión)
 - Conversor USD → ARS con los distintos tipos de dólar (oficial, blue, tarjeta, MEP, CCL)
-- Watchlist personal (vive en el navegador, no hay cuentas ni backend con estado) para chequear si algo que te interesa entró en oferta
+- Watchlist personal: se guarda en el navegador (no hay cuentas), pero chequear si algo que seguís entró en oferta sí le pega al backend en vivo contra las seis fuentes
 
 ## Cómo está armado
 
@@ -19,22 +19,26 @@ requirements.txt
 frontend/            # React + TypeScript + Vite + Tailwind/DaisyUI
 ```
 
-El backend no tiene base de datos: todo sale en vivo de fuentes externas, con caché en memoria de 5 minutos.
+El backend no tiene base de datos: todo sale en vivo de fuentes externas. Nada se pide en vivo por cada visita — Steam, Epic/GOG, Xbox y PlayStation se traen enteros en jobs de fondo (cada varias horas o una vez al día, según la fuente) y quedan cacheados en memoria; así ningún volumen de tráfico al sitio multiplica los pedidos salientes a esas APIs.
 
 | Tienda | Fuente | Notas |
 |---|---|---|
 | Steam | API pública oficial de Steam | Precio real en ARS |
 | Nintendo eShop AR | Scraping de [DekuDeals](https://www.dekudeals.com/) | No hay API pública oficial; ver advertencia abajo |
 | Epic Games Store / GOG | [CheapShark](https://www.cheapshark.com/api) | Precio en USD (esas tiendas no tienen precio local en AR) |
+| Xbox | Canal interno de ofertas de xbox.com (sin documentar) | Se pagina entera una vez al día |
+| PlayStation | GraphQL interno de store.playstation.com (sin documentar, Automatic Persisted Queries) | Precio en USD, igual que Epic/GOG |
 | Cotización del dólar | [dolarapi.com](https://dolarapi.com/) | |
 
-### ⚠️ Sobre el scraping de DekuDeals
+### ⚠️ Sobre las fuentes sin API pública (DekuDeals, Xbox, PlayStation)
 
-No existe una API pública oficial para consultar precios de Nintendo eShop Argentina. Este proyecto resuelve eso parseando el HTML de DekuDeals (que sí muestra precios en ARS). Esto significa:
+Ni Nintendo eShop AR, ni Xbox, ni PlayStation tienen una API pública oficial para consultar precios. Esto se resuelve parseando HTML (DekuDeals) o replicando los pedidos internos que usan sus propios sitios web (Xbox, PlayStation) — endpoints no documentados, no pensados para consumo externo. Esto significa:
 
-- Si DekuDeals cambia la estructura de su sitio, esa parte se rompe hasta que se actualice el parser
-- Epic/GOG (vía CheapShark) le devuelven **400 Bad Request** a las IPs de datacenter de Vercel — por eso el backend está pensado para correr en un servidor con IP residencial, no en el mismo Vercel del frontend (ver más abajo)
-- Nunca lo trates como una fuente 100% estable — está armado para degradarse bien (si una fuente falla, esa parte queda vacía en vez de romper toda la página), pero no es una API con garantías
+- Si cualquiera de los tres cambia la estructura de su sitio o de su API interna, esa parte se rompe hasta que se actualice
+- Epic/GOG (vía CheapShark) y Steam le devuelven error / bloquean temporalmente a cualquier IP que pida demasiado seguido — por eso TODO lo que pagina un catálogo entero (Steam global, Xbox, PlayStation, precios de Steam para Epic/GOG) lo hace secuencial, con pausas entre pedido y pedido, nunca en paralelo, y cacheado en un job de fondo aparte
+- El backend está pensado para correr en un servidor con IP residencial, no en el mismo Vercel del frontend (ver más abajo) — varias de estas fuentes bloquean o degradan pedidos desde IPs de datacenter
+- Nunca las trates como una fuente 100% estable — está armado para degradarse bien (si una fuente falla, esa parte queda vacía en vez de romper toda la página), pero no son APIs con garantías
+- Hay endpoints de diagnóstico para cada scraper (`/api/debug/xbox-deals`, `/api/debug/playstation-deals`) que muestran cuántas ofertas trajo la última corrida, si hubo errores, y hace cuánto se actualizó
 
 ## Correr en local
 
@@ -58,7 +62,7 @@ npm run dev                    # levanta en http://localhost:5173, con proxy a :
 ## Deploy
 
 - **Frontend**: Vercel (`frontend/` como Root Directory). Variable de entorno `VITE_API_BASE` apuntando a donde corra el backend.
-- **Backend**: en un servidor propio (no en el mismo Vercel — ver la advertencia de arriba sobre CheapShark bloqueando IPs de datacenter), con `gunicorn` + `nginx` + certificado TLS (Let's Encrypt). Hay un `.service` de systemd de ejemplo pensado para esto.
+- **Backend**: en un servidor propio (no en el mismo Vercel — ver la advertencia de arriba sobre IPs de datacenter), con `gunicorn` + `nginx` + certificado TLS (Let's Encrypt). Hay un `.service` de systemd de ejemplo pensado para esto.
 
 ## Licencia
 
